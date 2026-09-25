@@ -1,0 +1,13 @@
+services:
+  server:
+    build: ./server
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ag-data:/data
+    # Localhost only; point the host's Cloudflare Tunnel at http://localhost:8080.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  ag-data:

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.attention-getter" path="/org/gnome/shell/extensions/attention-getter/">
+    <key name="focus-key" type="as">
+      <!-- F13 is often delivered as XF86Tools by the default keymap, so bind both. -->
+      <default><![CDATA[['F13', 'XF86Tools']]]></default>
+      <summary>Focus the attention popup</summary>
+    </key>
+  </schema>
+</schemalist>

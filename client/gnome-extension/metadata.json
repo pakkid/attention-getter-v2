@@ -1,0 +1,8 @@
+{
+  "uuid": "attention-getter@pakkid",
+  "name": "Attention Getter",
+  "description": "Companion for the attention-getter client: keeps its popup from stealing focus and binds the hotkey that focuses it.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "settings-schema": "org.gnome.shell.extensions.attention-getter",
+  "url": "https://github.com/pakkid/attention-getter-v2"
+}
