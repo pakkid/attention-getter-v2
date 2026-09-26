@@ -5,7 +5,7 @@ services:
   server:
     build:
       context: ./server
-    image: attention-getter-server:latest
+    image: attention-getter-v2:latest
     restart: unless-stopped
     environment:
       PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL}
