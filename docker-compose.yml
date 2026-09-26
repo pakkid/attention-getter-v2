@@ -5,7 +5,9 @@ services:
   server:
     build:
       context: ./server
+    # Local tag for the image built on the server; never pulled from a registry.
     image: attention-getter-v2:latest
+    pull_policy: build
     restart: unless-stopped
     environment:
       PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL}
