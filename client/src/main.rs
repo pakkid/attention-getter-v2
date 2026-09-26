@@ -20,7 +20,8 @@ const USAGE: &str = "attention-getter: shows a fullscreen attention popup when t
 
 USAGE:
     attention-getter setup        Pair this PC with the server and choose monitor + hotkey
-    attention-getter run          Run the background service (what autostart runs)
+    attention-getter run          Run the background service (what autostart runs);
+                                  on Windows add --console to see its log in the terminal
     attention-getter install      Start automatically at login (and install the GNOME extension)
     attention-getter uninstall    Remove autostart
     attention-getter test [GIF] [SOUND]
@@ -94,16 +95,26 @@ fn real_main() -> Result<()> {
 /// The binary uses the GUI subsystem so the service and popup never show a console.
 /// CLI output re-attaches to the calling shell's console; interactive `setup` gets its own
 /// console window, because a GUI-subsystem process would fight the shell for keyboard input.
+/// The service (`run`, also the default) and popups never attach: a process attached to a
+/// console is killed when that window closes. To watch the service's log, run
+/// `attention-getter run --console`.
 /// Returns whether a console window was opened.
 #[cfg(windows)]
 fn windows_console() -> bool {
     use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole};
-    let interactive = std::env::args().nth(1).as_deref() == Some("setup");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = args.first().map_or("run", String::as_str);
+    let interactive = cmd == "setup";
+    let attach = match cmd {
+        "run" => args.iter().any(|a| a == "--console"),
+        "popup" => false,
+        _ => true,
+    };
     // SAFETY: plain Win32 calls; they fail harmlessly when not applicable.
     unsafe {
         if interactive {
             AllocConsole();
-        } else {
+        } else if attach {
             AttachConsole(ATTACH_PARENT_PROCESS);
         }
     }

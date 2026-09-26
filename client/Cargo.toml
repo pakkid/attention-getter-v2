@@ -1,6 +1,6 @@
 [package]
 name = "attention-getter"
-version = "0.1.1"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
@@ -43,4 +43,4 @@ x11rb = "0.13"
 [target.'cfg(windows)'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["native-tls"] }
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }

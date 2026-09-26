@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/client/scripts/install.sh | sh
 #
-# Downloads the latest release (or $AG_VERSION, e.g. "v0.1.1"), checks it against
+# Downloads the latest release (or $AG_VERSION, e.g. "v1.0.0"), checks it against
 # SHA256SUMS, replaces any existing install, runs `setup` if this PC isn't paired yet, and
 # enables start at login (systemd user unit, plus the GNOME extension on GNOME).
 # Re-run it any time to update; the pairing and settings are kept.

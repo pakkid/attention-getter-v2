@@ -190,13 +190,15 @@ mod linux {
 #[cfg(windows)]
 mod windows {
     use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
     use anyhow::{Result, bail};
 
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
     const VALUE: &str = "AttentionGetter";
     const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
     pub fn install() -> Result<()> {
         crate::config::Config::load()?;
@@ -204,12 +206,71 @@ mod windows {
         let cmd = format!("\"{}\" run", exe.display());
         let st = Command::new("reg")
             .args(["add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &cmd, "/f"])
+            .stdout(Stdio::null())
             .status()?;
         if !st.success() {
             bail!("reg add failed");
         }
-        Command::new(&exe).arg("run").creation_flags(DETACHED_PROCESS).spawn()?;
-        println!("Starts at login ({cmd}) and is running now.");
+        stop_others(&exe);
+        start_detached(&exe)?;
+        println!("Starts at login ({cmd}) and is running in the background now.");
+        Ok(())
+    }
+
+    /// Stops any other running copy with this exe's file name (service or popup), so two
+    /// services don't take turns kicking each other off the server.
+    fn stop_others(exe: &std::path::Path) {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+        };
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject};
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+
+        let Some(name) = exe.file_name().and_then(|n| n.to_str()).map(str::to_lowercase) else { return };
+        let me = std::process::id();
+        // SAFETY: standard ToolHelp enumeration; every handle opened here is closed here.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut e) != 0;
+            while ok {
+                let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                let exe_name = String::from_utf16_lossy(&e.szExeFile[..len]).to_lowercase();
+                if e.th32ProcessID != me && exe_name == name {
+                    let h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, e.th32ProcessID);
+                    if !h.is_null() {
+                        TerminateProcess(h, 0);
+                        WaitForSingleObject(h, 5000);
+                        CloseHandle(h);
+                    }
+                }
+                ok = Process32NextW(snap, &mut e) != 0;
+            }
+            CloseHandle(snap);
+        }
+    }
+
+    /// Starts the service with no console, no inherited handles and its own process group,
+    /// so it keeps running when the terminal that ran `install` closes. It also leaves the
+    /// terminal's job object where allowed, so `Start-Process -Wait` doesn't wait on it.
+    fn start_detached(exe: &std::path::Path) -> Result<()> {
+        let spawn = |flags| {
+            Command::new(exe)
+                .arg("run")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(flags)
+                .spawn()
+        };
+        let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+        // Breaking away fails if the job forbids it; then start inside the job instead.
+        spawn(flags | CREATE_BREAKAWAY_FROM_JOB).or_else(|_| spawn(flags))?;
         Ok(())
     }
 
