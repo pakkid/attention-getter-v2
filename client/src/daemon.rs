@@ -53,7 +53,7 @@ pub fn run() -> Result<()> {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
-            .user_agent(concat!("attention-getter/", env!("CARGO_PKG_VERSION")))
+            .user_agent(config::user_agent())
             .build()?;
         let mut d = Daemon {
             cache: Cache::new(config::cache_dir()?),
@@ -96,6 +96,7 @@ impl Daemon {
         let mut req = self.cfg.ws_url().into_client_request()?;
         req.headers_mut()
             .insert("Authorization", format!("Bearer {}", self.cfg.token).parse()?);
+        req.headers_mut().insert("User-Agent", config::user_agent().parse()?);
         let (ws, _) = tokio::time::timeout(Duration::from_secs(20), tokio_tungstenite::connect_async(req))
             .await
             .context("connect timeout")?

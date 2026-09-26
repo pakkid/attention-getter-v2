@@ -109,17 +109,23 @@ pub fn run() -> Result<()> {
     }
     let server = server.trim_end_matches('/').to_string();
 
-    let (token, name) = match existing.as_ref().filter(|c| c.server == server) {
+    let same_server = existing.as_ref().filter(|c| c.server == server);
+    let (token, name) = match same_server {
         Some(c) if prompt("Already paired. Pair again? (y/N)", "n")?.eq_ignore_ascii_case("n") => (c.token.clone(), c.name.clone()),
         _ => {
             println!("In the web app: Admin → PCs → + Add PC to get a pairing code.");
             let code = prompt("Pairing code", "")?;
+            println!("Dual-boot PC? Use the same name on each OS and they show up as one PC.");
             let name = prompt("Name for this PC", &existing.as_ref().map_or_else(hostname, |c| c.name.clone()))?;
+            // Re-pairing: the server revokes our old token instead of keeping a stale install.
+            let replaces = same_server.map(|c| c.token.as_str()).unwrap_or_default();
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
             let resp = rt.block_on(async {
-                let r = reqwest::Client::new()
+                let r = reqwest::Client::builder()
+                    .user_agent(config::user_agent())
+                    .build()?
                     .post(format!("{server}/api/device/pair"))
-                    .json(&serde_json::json!({ "code": code, "name": name }))
+                    .json(&serde_json::json!({ "code": code, "name": name, "replaces": replaces }))
                     .send()
                     .await?;
                 if !r.status().is_success() {

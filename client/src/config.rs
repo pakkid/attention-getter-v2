@@ -19,6 +19,12 @@ pub struct Config {
     pub hotkey: String,
 }
 
+/// Sent on every request, e.g. "attention-getter/1.1.0 (linux)". The server shows the OS and
+/// version per install, which tells the two sides of a dual-boot PC apart.
+pub fn user_agent() -> String {
+    format!("attention-getter/{} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS)
+}
+
 pub fn default_hotkey() -> String {
     "F13".into()
 }
@@ -89,6 +95,16 @@ mod tests {
         assert_eq!(c.ws_url(), "wss://a.example/api/device/ws");
         c.server = "http://localhost:8080".into();
         assert_eq!(c.ws_url(), "ws://localhost:8080/api/device/ws");
+    }
+
+    #[test]
+    fn user_agent_names_version_and_os() {
+        let ua = user_agent();
+        assert!(
+            ua.starts_with(concat!("attention-getter/", env!("CARGO_PKG_VERSION"), " (")),
+            "{ua}"
+        );
+        assert!(ua.ends_with(&format!("({})", std::env::consts::OS)), "{ua}");
     }
 
     #[test]
