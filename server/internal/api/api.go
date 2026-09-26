@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -167,10 +168,13 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// assetRef matches a same-origin asset link with a version query in index.html: src="/app.js?v=2".
+var assetRef = regexp.MustCompile(`((?:href|src)="/)([^"?]+)\?v=[^"]*"`)
+
 func staticHandler(root fs.FS) http.Handler {
 	files := http.FileServerFS(root)
 	// Content-hash ETags: embedded files have no modtime, so this is what lets browsers revalidate cheaply.
-	etags := map[string]string{}
+	hashes := map[string]string{}
 	_ = fs.WalkDir(root, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -180,16 +184,39 @@ func staticHandler(root fs.FS) http.Handler {
 			return err
 		}
 		sum := sha256.Sum256(b)
-		etags["/"+p] = `"` + hex.EncodeToString(sum[:8]) + `"`
+		hashes["/"+p] = hex.EncodeToString(sum[:8])
 		return nil
 	})
-	etags["/"] = etags["/index.html"]
+	// Cloudflare replaces no-cache on .js/.css with its Browser Cache TTL (4 h), so browsers
+	// would keep old code after a deploy. The page itself isn't cached, so give each asset link
+	// its content hash (?v=<hash>): every deploy that changes a file changes its URL.
+	page, _ := fs.ReadFile(root, "index.html")
+	page = assetRef.ReplaceAllFunc(page, func(m []byte) []byte {
+		sub := assetRef.FindSubmatch(m)
+		h, ok := hashes["/"+string(sub[2])]
+		if !ok {
+			return m
+		}
+		return []byte(string(sub[1]) + string(sub[2]) + "?v=" + h + `"`)
+	})
+	sum := sha256.Sum256(page)
+	pageTag := `"` + hex.EncodeToString(sum[:8]) + `"`
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Always revalidate (unchanged files get a 304). Without an explicit header Cloudflare adds a
 		// 4-hour browser TTL, and a deploy doesn't show up until that runs out.
 		w.Header().Set("Cache-Control", "no-cache")
-		if tag, ok := etags[r.URL.Path]; ok {
-			w.Header().Set("ETag", tag)
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			w.Header().Set("ETag", pageTag)
+			if r.Header.Get("If-None-Match") == pageTag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(page)
+			return
+		}
+		if h, ok := hashes[r.URL.Path]; ok {
+			w.Header().Set("ETag", `"`+h+`"`)
 		}
 		files.ServeHTTP(w, r)
 	})
