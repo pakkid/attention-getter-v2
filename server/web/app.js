@@ -526,6 +526,22 @@ const OS_NAMES = { linux: 'Linux', windows: 'Windows' };
 // An install is named by its OS when the client reports it (1.1.0+), else by the name it was paired under.
 const installName = (i) => OS_NAMES[i.os] || i.label;
 
+// Client versions: 1.1.0+ report theirs. "Update available" means older than the newest version
+// any PC reports, so it needs no lookup of the latest release.
+const semver = (v) => v.split('.').map((n) => parseInt(n, 10) || 0);
+const olderThan = (a, b) => { const [x, y] = [semver(a), semver(b)]; for (let k = 0; k < 3; k++) if (x[k] !== y[k]) return x[k] < y[k]; return false; };
+const newestVersion = () => state.devices.flatMap((d) => d.installs || []).map((i) => i.version).filter(Boolean)
+  .reduce((best, v) => (!best || olderThan(best, v) ? v : best), '');
+function versionInfo(i, newest) {
+  if (!i.version && !i.online && !i.last_seen) return null; // never connected
+  const behind = newest && (i.version ? olderThan(i.version, newest) : i.online);
+  // Connected without a version means a client from before 1.1.0; offline, it may just not have reconnected yet.
+  const v = i.version ? `v${i.version}` : i.online ? 'before v1.1.0' : 'version unknown';
+  return [v, behind ? el('span', { class: 'update-note' }, 'update available') : null];
+}
+// A dateline from strings and nodes, separated by middots.
+const dateline = (...parts) => el('div', { class: 'dateline' }, parts.flat().filter(Boolean).flatMap((p, k) => (k ? [' · ', p] : [p])));
+
 function pcsSection(reload) {
   const s = el('div', {}, el('h2', {}, 'PCs'));
   const list = el('div', { class: 'card list' });
@@ -533,11 +549,13 @@ function pcsSection(reload) {
     const item = el('div', { class: 'item' });
     const installs = d.installs || [];
     const via = installs.length > 1 ? installs.find((i) => i.online) : null;
+    // A merged PC shows the version on each install's row instead.
+    const version = installs.length === 1 ? versionInfo(installs[0], newestVersion()) : null;
     const status = d.online ? (via ? `Online on ${installName(via)}` : 'Online')
       : installs.length ? `Last seen ${ago(d.last_seen)}` : 'No install left: pair it again or remove it';
     // replaceChildren would print null as text; filter the optional pieces out.
     const show = () => item.replaceChildren(...[el('span', { class: 'dot' + (d.online ? ' on' : '') }),
-      el('div', { class: 'grow' }, el('div', { class: 'item-name' }, d.name), el('div', { class: 'dateline' }, status)),
+      el('div', { class: 'grow' }, el('div', { class: 'item-name' }, d.name), dateline(status, version)),
       el('button', { class: 'link', onclick: edit }, 'Rename'),
       state.devices.length > 1 ? el('button', { class: 'link', onclick: merge }, 'Merge') : null,
       el('button', { class: 'link danger', onclick: guard(async () => {
@@ -593,14 +611,15 @@ function pcsSection(reload) {
 // The OSes of a merged (dual-boot) PC, each with its own pairing.
 function installList(d, reload) {
   const box = el('div', { class: 'installs' });
+  const newest = newestVersion();
   for (const i of d.installs) {
     const row = el('div', { class: 'item' });
     const name = installName(i);
     const show = () => row.replaceChildren(el('span', { class: 'dot' + (i.online ? ' on' : '') }),
-      el('div', { class: 'grow' }, el('div', { class: 'install-name' }, name), el('div', { class: 'dateline' }, [
-        i.os && i.label !== d.name ? `paired as ${i.label}` : null, i.version ? `v${i.version}` : null,
+      el('div', { class: 'grow' }, el('div', { class: 'install-name' }, name), dateline(
+        i.os && i.label !== d.name ? `paired as ${i.label}` : null, versionInfo(i, newest),
         i.online ? 'Online' : `Last seen ${ago(i.last_seen)}`,
-      ].filter(Boolean).join(' · '))),
+      )),
       el('button', { class: 'link', onclick: split }, 'Split off'),
       el('button', { class: 'link danger', onclick: guard(async () => {
         if (!confirm(`Remove ${name} from ${d.name}? That OS will need to be paired again.`)) return;

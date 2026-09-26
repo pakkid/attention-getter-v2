@@ -267,6 +267,7 @@ label.check input { width: 20px; height: 20px; accent-color: var(--fern); flex: 
 .installs { flex-basis: 100%; margin: var(--space-1) 0 0 4px; padding-left: var(--space-4); border-left: var(--line-rule) solid var(--rule); }
 .installs > .item { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); align-items: center; padding: var(--space-1) 0; }
 .install-name { font: 600 15px/20px var(--font-sans); overflow-wrap: anywhere; }
+.update-note { color: var(--amber); }
 
 .code { font: 500 28px/1.2 var(--font-mono); letter-spacing: .15em; }
 .mono { font: 400 13px/20px var(--font-mono); word-break: break-all; }
