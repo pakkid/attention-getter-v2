@@ -23,7 +23,7 @@ jobs:
         working-directory: server
         run: go vet ./... && go test -race ./...
       - name: Build Docker image (checks the Dockerfile Portainer uses)
-        run: docker build -t attention-getter-server:ci server
+        run: docker build -t attention-getter-v2:ci server
 
   client:
     strategy:
