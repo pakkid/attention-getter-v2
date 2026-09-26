@@ -8,6 +8,7 @@ mod media;
 mod popup;
 mod protocol;
 mod setup;
+mod update;
 
 use anyhow::Result;
 
@@ -24,6 +25,9 @@ USAGE:
                                   on Windows add --console to see its log in the terminal
     attention-getter install      Start automatically at login (and install the GNOME extension)
     attention-getter uninstall    Remove autostart
+    attention-getter update [vX.Y.Z]
+                                  Download and install the latest release (or the given
+                                  version); pairing and settings are kept
     attention-getter test [GIF] [SOUND]
                                   Show a local test popup
     attention-getter monitors     List monitor names";
@@ -54,6 +58,7 @@ fn real_main() -> Result<()> {
         "setup" => setup::run(),
         "install" => install::install(),
         "uninstall" => install::uninstall(),
+        "update" => update::run(args.get(1).map(String::as_str)),
         "monitors" => {
             for m in setup::monitors()? {
                 println!("{m}");
