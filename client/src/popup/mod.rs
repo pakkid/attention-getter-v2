@@ -560,7 +560,9 @@ impl ApplicationHandler<UserEvent> for App {
             el.exit();
             return;
         }
-        self.gfx.as_ref().unwrap().window.request_redraw();
+        // Paint the first frame now rather than via request_redraw: the window is still
+        // hidden, and Windows never sends WM_PAINT to hidden windows, so it would never show.
+        self.redraw(el);
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

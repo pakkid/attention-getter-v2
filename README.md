@@ -43,7 +43,15 @@ Under **Settings** each user picks what to be notified about: *replies to my req
 
 ## 2. PC client
 
-Download `attention-getter-linux-x86_64` or `attention-getter-windows-x86_64.exe` from the [latest release](https://github.com/pakkid/attention-getter-v2/releases/latest) and put it somewhere permanent: `~/.local/bin/attention-getter` (then `chmod +x`), or on Windows e.g. `%LOCALAPPDATA%\Programs\attention-getter.exe`.
+**Windows quick install** (also updates an existing install; run it again any time). In PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/client/scripts/install.ps1 | iex
+```
+
+It downloads the latest release, verifies its checksum, replaces any running copy, runs `setup` if the PC isn't paired yet, and enables start at login. Set `$env:AG_VERSION = "v0.1.0"` first to pin a version.
+
+Or download `attention-getter-linux-x86_64` or `attention-getter-windows-x86_64.exe` from the [latest release](https://github.com/pakkid/attention-getter-v2/releases/latest) and put it somewhere permanent: `~/.local/bin/attention-getter` (then `chmod +x`), or on Windows e.g. `%LOCALAPPDATA%\Programs\attention-getter.exe`.
 
 Or build it (Rust 1.95+):
 
