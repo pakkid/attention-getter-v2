@@ -3,8 +3,9 @@
 #   irm https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/client/scripts/install.ps1 | iex
 #
 # Downloads the latest release (or $env:AG_VERSION, e.g. "v1.0.0"), checks it against
-# SHA256SUMS, replaces any running copy, runs `setup` if this PC isn't paired yet, and
-# enables start at login. Re-run it any time to update; the pairing and settings are kept.
+# SHA256SUMS, replaces any running copy, runs `setup` if this PC isn't paired yet, enables
+# start at login and puts the install folder on the user PATH. Re-run it any time to update
+# (or run `attention-getter update`, which runs this script); the pairing and settings are kept.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue' # the progress bar makes iwr very slow on PowerShell 5.1
@@ -13,8 +14,11 @@ $ProgressPreference = 'SilentlyContinue' # the progress bar makes iwr very slow 
 $repo = 'pakkid/attention-getter-v2'
 $asset = 'attention-getter-windows-x86_64.exe'
 $base = if ($env:AG_VERSION) { "https://github.com/$repo/releases/download/$env:AG_VERSION" } else { "https://github.com/$repo/releases/latest/download" }
-$dir = Join-Path $env:LOCALAPPDATA 'Programs'
+# Its own folder, so putting it on PATH exposes nothing else. Releases up to 1.0.x installed
+# straight into Programs; that copy is removed below.
+$dir = Join-Path $env:LOCALAPPDATA 'Programs\attention-getter'
 $exe = Join-Path $dir 'attention-getter.exe'
+$legacy = Join-Path $env:LOCALAPPDATA 'Programs\attention-getter.exe'
 $config = Join-Path $env:APPDATA 'attention-getter\config\config.toml'
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "attention-getter-$([guid]::NewGuid()).exe"
@@ -46,9 +50,11 @@ try {
     New-Item -ItemType Directory -Force $dir | Out-Null
     Move-Item -Force $tmp $exe
     Unblock-File $exe
-    if ($old -and $old -ne $exe -and (Test-Path $old)) {
-        Remove-Item -Force $old -ErrorAction SilentlyContinue
-        Write-Host "Removed the previous copy at $old"
+    foreach ($prev in @($old, $legacy)) {
+        if ($prev -and $prev -ne $exe -and (Test-Path $prev)) {
+            Remove-Item -Force $prev -ErrorAction SilentlyContinue
+            Write-Host "Removed the previous copy at $prev"
+        }
     }
     Write-Host "Installed $exe"
 } finally {
@@ -62,4 +68,25 @@ if (-not (Test-Path $config)) {
     if (-not (Test-Path $config)) { throw "Setup didn't finish. Run '$exe setup', then run this installer again." }
 }
 Start-Process $exe -ArgumentList 'install' -NoNewWindow -Wait
-Write-Host "Done. Preview the popup with: & '$exe' test"
+
+# Put the install folder on the user PATH. Edit the registry value directly to keep its type
+# (REG_EXPAND_SZ) and any %VARIABLES% in it, which [Environment]::SetEnvironmentVariable expands.
+$envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+try {
+    $userPath = [string]$envKey.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+    if (($userPath -split ';') -notcontains $dir) {
+        $kind = if ($envKey.GetValueNames() -contains 'Path') { $envKey.GetValueKind('Path') } else { 'ExpandString' }
+        $envKey.SetValue('Path', ((@($userPath -split ';' | Where-Object { $_ }) + $dir) -join ';'), $kind)
+        # Tell Explorer, so terminals opened from now on see the new PATH without signing out.
+        if (-not ('AttentionGetter.Win32' -as [type])) {
+            Add-Type -Namespace AttentionGetter -Name Win32 -MemberDefinition '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'
+        }
+        $result = [UIntPtr]::Zero
+        [void][AttentionGetter.Win32]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+        Write-Host "Added $dir to your PATH."
+    }
+} finally {
+    $envKey.Close()
+}
+if (($env:Path -split ';') -notcontains $dir) { $env:Path = "$env:Path;$dir" } # this window too
+Write-Host "Done. Preview the popup with: attention-getter test"

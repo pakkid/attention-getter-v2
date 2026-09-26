@@ -270,6 +270,7 @@ label.check input { width: 20px; height: 20px; accent-color: var(--fern); flex: 
 
 .code { font: 500 28px/1.2 var(--font-mono); letter-spacing: .15em; }
 .mono { font: 400 13px/20px var(--font-mono); word-break: break-all; }
+code { font-family: var(--font-mono); font-size: .92em; }
 .secret {
   background: var(--paper-raised); padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
   border: var(--line-hair) solid var(--rule); border-radius: var(--radius-md);

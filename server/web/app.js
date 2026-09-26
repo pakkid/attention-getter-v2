@@ -659,7 +659,8 @@ function installGuide(code) {
           el('div', { class: 'muted small' }, 'Then give the PC a name, pick the monitor for the popup and the hotkey (F13 by default).'),
           el('div', { class: 'muted small' }, 'Dual-boot PC? Pair each OS with the same name and they show up as one PC.'))
         : step(2, el('div', {}, 'A new PC needs a pairing code: close this and tap ', el('strong', {}, 'Add PC'), '.'),
-          el('div', { class: 'muted small' }, 'To update a PC that is already set up, just run the command again; it keeps its pairing and settings.')),
+          el('div', { class: 'muted small' }, 'To update a PC that is already set up, run ', el('code', {}, 'attention-getter update'),
+            ' on it (version 1.1.0 or later), or run the command above again. Either way it keeps its pairing and settings.')),
       step(3, el('div', {}, code ? 'The PC shows up in this list as soon as it connects.' : 'The PC reconnects by itself after updating.'),
         el('div', { class: 'muted small' }, os.note)),
     );

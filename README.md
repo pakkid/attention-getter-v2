@@ -58,16 +58,18 @@ curl -fsSL https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/cli
 irm https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/client/scripts/install.ps1 | iex
 ```
 
-Both download the latest release, verify its checksum, replace any existing install, run `setup` if the PC isn't paired yet, and enable start at login (on GNOME, log out and back in afterwards if the extension is new or changed). To pin a version, set `AG_VERSION=v1.0.0` (Linux: `curl ... | AG_VERSION=v1.0.0 sh`; Windows: `$env:AG_VERSION = "v1.0.0"` first).
+Both download the latest release, verify its checksum, replace any existing install, run `setup` if the PC isn't paired yet, enable start at login (on GNOME, log out and back in afterwards if the extension is new or changed), and put the install folder on your PATH: `~/.local/bin` (via your shell's rc file, only if it isn't already there) or `%LOCALAPPDATA%\Programs\attention-getter`. Open a new terminal afterwards to use the `attention-getter` command. To pin a version, set `AG_VERSION=v1.0.0` (Linux: `curl ... | AG_VERSION=v1.0.0 sh`; Windows: `$env:AG_VERSION = "v1.0.0"` first).
 
-Or download `attention-getter-linux-x86_64` or `attention-getter-windows-x86_64.exe` from the [latest release](https://github.com/pakkid/attention-getter-v2/releases/latest) and put it somewhere permanent: `~/.local/bin/attention-getter` (then `chmod +x`), or on Windows e.g. `%LOCALAPPDATA%\Programs\attention-getter.exe`.
+**Updating:** from 1.1.0 on, run `attention-getter update` on the PC. It runs the same installer, so it keeps the pairing and settings (`attention-getter update v1.0.0` installs a specific version). On Windows it opens in its own PowerShell window, because a running exe can't replace itself. Older versions update by re-running the one-liner above.
+
+Or download `attention-getter-linux-x86_64` or `attention-getter-windows-x86_64.exe` from the [latest release](https://github.com/pakkid/attention-getter-v2/releases/latest) and put it somewhere permanent: `~/.local/bin/attention-getter` (then `chmod +x`), or on Windows e.g. `%LOCALAPPDATA%\Programs\attention-getter\attention-getter.exe`.
 
 Or build it (Rust 1.95+):
 
 ```sh
 cd client && cargo build --release
 # Linux: cp target/release/attention-getter ~/.local/bin/
-# Windows: copy target\release\attention-getter.exe to e.g. %LOCALAPPDATA%\Programs\
+# Windows: copy target\release\attention-getter.exe to e.g. %LOCALAPPDATA%\Programs\attention-getter\
 ```
 
 On Linux the build needs the usual windowing and audio headers (`libxkbcommon`, `wayland`, `alsa-lib`). On Windows nothing extra is needed.
@@ -87,6 +89,7 @@ Then:
 attention-getter setup      # server URL + pairing code, pick monitor, hotkey (default F13)
 attention-getter test ~/some.gif ~/some.mp3   # preview the popup locally
 attention-getter install    # start at login
+attention-getter update     # later: install the latest release (1.1.0+)
 ```
 
 - **Linux** installs a systemd user unit (`journalctl --user -u attention-getter -f` for logs).

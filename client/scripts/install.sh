@@ -5,8 +5,9 @@
 #
 # Downloads the latest release (or $AG_VERSION, e.g. "v1.0.0"), checks it against
 # SHA256SUMS, replaces any existing install, runs `setup` if this PC isn't paired yet, and
-# enables start at login (systemd user unit, plus the GNOME extension on GNOME).
-# Re-run it any time to update; the pairing and settings are kept.
+# enables start at login (systemd user unit, plus the GNOME extension on GNOME), and puts
+# ~/.local/bin on PATH if it isn't. Re-run it any time to update (or run `attention-getter
+# update`, which runs this script); the pairing and settings are kept.
 set -eu
 
 repo=pakkid/attention-getter-v2
@@ -73,8 +74,31 @@ if [ -f "$ext" ] && [ "$ext_before" != "$(sha256sum <"$ext")" ] && [ -n "$old" ]
     echo "The GNOME extension changed: log out and back in to load the new version."
 fi
 
+# Put $bindir on PATH for new terminals. Many distros already do this for ~/.local/bin, some
+# (e.g. Arch) don't. The added line checks PATH itself, so it never adds a duplicate entry.
 case ":$PATH:" in
 *":$bindir:"*) ;;
-*) echo "Note: $bindir is not on your PATH." ;;
+*)
+    marker="# Added by the Attention Getter installer"
+    case "$(basename "${SHELL:-sh}")" in
+    bash) rc="$HOME/.bashrc" ;;
+    zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+    fish) rc="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/attention-getter.fish" ;;
+    *) rc="$HOME/.profile" ;;
+    esac
+    if ! grep -qsF "$marker" "$rc"; then
+        mkdir -p "$(dirname "$rc")"
+        case "$rc" in
+        *.fish) printf '%s\ncontains "%s" $PATH; or set -gx PATH "%s" $PATH\n' "$marker" "$bindir" "$bindir" >>"$rc" ;;
+        *) printf '\n%s\ncase ":$PATH:" in *":%s:"*) ;; *) export PATH="%s:$PATH" ;; esac\n' "$marker" "$bindir" "$bindir" >>"$rc" ;;
+        esac
+        echo "Added $bindir to your PATH in $rc."
+    fi
+    echo "Open a new terminal to use the attention-getter command."
+    ;;
 esac
 echo "Done. Preview the popup with: attention-getter test"
+# Releases before 1.1.0 have no update command.
+if "$exe" help 2>/dev/null | grep -q ' update '; then
+    echo "Update later with: attention-getter update"
+fi

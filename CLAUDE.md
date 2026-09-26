@@ -55,14 +55,15 @@ The scripts depend on these contracts. If you change one side, change the other 
 | Contract | Defined in | Relied on by |
 |---|---|---|
 | Release asset names `attention-getter-linux-x86_64`, `attention-getter-windows-x86_64.exe`, and `SHA256SUMS` in `sha256sum` format (`<hash>  <name>`) | `release.yml` (matrix `asset`, Checksums step) | both scripts (download URL + checksum grep) |
-| Repo `pakkid/attention-getter-v2` and paths `client/scripts/install.{sh,ps1}` on `main` | the repo | `repo=` in both scripts, the `INSTALL` commands in `server/web/app.js`, README "Quick install" |
+| Repo `pakkid/attention-getter-v2` and paths `client/scripts/install.{sh,ps1}` on `main` | the repo | `repo=` in both scripts, the `INSTALL` commands in `server/web/app.js`, README "Quick install", `SCRIPTS` in `client/src/update.rs` (every installed 1.1.0+ client fetches the script from there, so moving it breaks `update` on PCs that haven't reinstalled) |
+| `attention-getter update [vX.Y.Z]` runs the script: Linux `sh <file>` with the terminal as stdin; Windows `irm | iex` in a new PowerShell window. A pinned version arrives as `AG_VERSION` | `client/src/update.rs` | both scripts must keep working when started this way |
 | Subcommands: `setup` (interactive; writes the config), `install` (idempotent; enables autostart and (re)starts the service), `run` (the service) | `client/src/main.rs`, `setup.rs`, `install.rs` | both scripts call `setup` if there's no config, then `install` |
 | Config path: Linux `${XDG_CONFIG_HOME:-~/.config}/attention-getter/config.toml`, Windows `%APPDATA%\attention-getter\config\config.toml` (`directories::ProjectDirs::from("", "", "attention-getter")`) | `client/src/config.rs` | both scripts check it to decide whether to run `setup` |
 | Linux unit `~/.config/systemd/user/attention-getter.service` with the line `ExecStart="<exe>" run` | `install.rs` (linux `install()`) | `install.sh` sed-parses that exact line to find and remove an old copy elsewhere |
 | Windows autostart `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `AttentionGetter` = `"<exe>" run` | `install.rs` (windows `RUN_KEY`/`VALUE`) | `install.ps1` reads the quoted path to find the old copy and processes to stop |
 | Process/exe name `attention-getter*` | Cargo package name / asset names | `install.ps1` stops running copies by name before replacing the exe |
 | GNOME extension dir `~/.local/share/gnome-shell/extensions/attention-getter@pakkid/extension.js` | `install.rs` (`EXT_UUID`) | `install.sh` hashes it to tell the user to log out when it changed |
-| Install locations `~/.local/bin/attention-getter`, `%LOCALAPPDATA%\Programs\attention-getter.exe` | the scripts | README, the web app's install guide text |
+| Install locations `~/.local/bin/attention-getter`, `%LOCALAPPDATA%\Programs\attention-getter\attention-getter.exe` (until 1.0.x it was `Programs\attention-getter.exe`; `install.ps1` removes that copy). The scripts put the folder on PATH: Linux adds a guarded line to the shell's rc file (marker `# Added by the Attention Getter installer`), Windows edits `HKCU\Environment\Path` | the scripts | README, the web app's install guide text |
 
 Other things to keep in mind:
 
