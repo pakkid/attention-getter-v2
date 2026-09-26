@@ -4,25 +4,30 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Attention Getter</title>
-  <meta name="theme-color" content="#ff5a36">
+  <meta name="theme-color" content="#eeeae3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111814" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Attention">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icons/icon-180.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400..700;1,6..72,400..600&family=Instrument+Sans:wght@400..700&family=IBM+Plex+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="/style.css">
   <script src="https://accounts.google.com/gsi/client" async></script>
   <script type="module" src="/app.js"></script>
 </head>
 <body>
   <header id="top" hidden>
-    <nav id="tabs">
+    <nav id="tabs" aria-label="Sections">
       <a href="#trigger" data-tab="trigger">Trigger</a>
       <a href="#history" data-tab="history">History</a>
       <a href="#settings" data-tab="settings">Settings</a>
       <a href="#admin" data-tab="admin" hidden>Admin</a>
+      <span class="tab-indicator" aria-hidden="true"></span>
     </nav>
   </header>
   <main id="app"><p class="muted center">Loading…</p></main>

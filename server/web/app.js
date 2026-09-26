@@ -70,8 +70,94 @@ const mediaURL = (t, kind) => `/media/${t.id}/${kind}?h=${t.hash}`;
 const shownName = (u) => u.display_name || u.name || u.email;
 const firstName = (n) => (n.includes('@') ? n.split('@')[0] : n.split(/\s+/)[0]);
 
+// Broadsheet line icons: 24px grid, 1.5 stroke, round caps, drawn in currentColor.
+const ICONS = {
+  check: ['M5 12.5l4.5 4.5L19 7.5'],
+};
+function icon(name, size = 18) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  for (const [k, v] of Object.entries({ class: 'icon', width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(k, v);
+  for (const d of ICONS[name]) { const p = document.createElementNS(ns, 'path'); p.setAttribute('d', d); svg.append(p); }
+  return svg;
+}
+
+const tag = (tone, text) => el('span', { class: `tag tag-${tone}` }, tone === 'live' ? el('span', { class: 'tag-dot', 'aria-hidden': 'true' }) : null, text);
+const dot = (on) => [el('span', { class: 'dot' + (on ? ' on' : ''), 'aria-hidden': 'true' }), el('span', { class: 'sr-only' }, on ? 'online, ' : 'offline, ')];
+
 function copyBtn(text) {
   return el('button', { class: 'link', onclick: () => navigator.clipboard.writeText(text).then(() => toast('Copied'), () => toast('Copy failed')) }, 'Copy');
+}
+
+// ---------- motion ----------
+
+const calm = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+// One-shot animation cues, consumed by the next render so ordinary re-renders stay still.
+const fx = { picked: '', fresh: new Set(), changed: new Set() };
+
+// Replays a CSS animation class on an element.
+function play(node, cls, ms = 900) {
+  if (!node || calm()) return;
+  node.classList.remove(cls);
+  void node.offsetWidth;
+  node.classList.add(cls);
+  setTimeout(() => node.classList.remove(cls), ms);
+}
+
+// A sent alert rings out: the send button shakes like an alarm clock, red rings pulse outward and the phone buzzes.
+function alarm() {
+  const btn = document.querySelector('button.big');
+  if (!btn || calm()) return;
+  navigator.vibrate?.([70, 50, 70, 50, 70]);
+  play(btn, 'alarm', 800);
+  const r = btn.getBoundingClientRect();
+  for (let i = 0; i < 3; i++) {
+    const ring = el('span', { class: 'alarm-ring', 'aria-hidden': 'true' });
+    Object.assign(ring.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    document.body.append(ring);
+    ring.animate([
+      { outlineOffset: '0px', opacity: 0.8 },
+      { outlineOffset: '26px', opacity: 0 },
+    ], { duration: 750, delay: i * 180, easing: 'cubic-bezier(.2,.7,.3,1)', fill: 'backwards' }).finished.then(() => ring.remove());
+  }
+}
+
+// Nothing went out: a quick side-to-side "nope".
+function nope() {
+  play(document.querySelector('button.big'), 'nope', 600);
+  if (!calm()) navigator.vibrate?.([40, 60, 40]);
+}
+
+// Slides the tab underline under the current tab.
+function placeIndicator() {
+  const bar = document.querySelector('.tab-indicator');
+  const a = document.querySelector('#tabs a[aria-current=page]');
+  if (!bar || !a || !a.offsetWidth) return;
+  bar.style.width = `${a.offsetWidth}px`;
+  bar.style.transform = `translateX(${a.offsetLeft}px)`;
+  requestAnimationFrame(() => bar.classList.add('ready'));
+}
+
+// Staggered rise of the page's pieces; used on first load and when view transitions are unavailable.
+function enterPage() {
+  const app = document.getElementById('app');
+  if (calm()) return;
+  play(app, 'enter', 1200);
+}
+
+const TABS = ['trigger', 'history', 'settings', 'admin'];
+let shownTab = null;
+
+// Tab change: the old page slides out and the new one bounces in from the side you're heading to.
+function changeTab() {
+  const from = TABS.indexOf(shownTab), to = TABS.indexOf(tab());
+  const swap = () => { scrollTo(0, 0); render(); };
+  if (!state.me || calm() || !document.startViewTransition) { swap(); enterPage(); return; }
+  const root = document.documentElement;
+  root.dataset.dir = to < from ? 'back' : 'forward';
+  root.classList.add('vt-running');
+  document.startViewTransition(swap).finished.finally(() => root.classList.remove('vt-running'));
 }
 
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
@@ -84,9 +170,12 @@ async function boot() {
   state.config = await api('GET', '/api/config');
   try { state.me = await api('GET', '/api/me'); } catch { state.me = null; }
   if (state.me) await loadAll();
-  window.addEventListener('hashchange', render);
+  window.addEventListener('hashchange', changeTab);
+  window.addEventListener('resize', placeIndicator);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && state.me) loadAll().then(render); });
   render();
+  if (!calm()) play(document.getElementById('top'), 'drop', 1000);
+  enterPage();
 }
 
 async function loadAll() {
@@ -105,7 +194,13 @@ function connectEvents() {
     const ev = JSON.parse(e.data);
     if (ev.type === 'alert') {
       const i = state.alerts.findIndex((a) => a.id === ev.alert.id);
-      if (i >= 0) state.alerts[i] = ev.alert; else state.alerts.unshift(ev.alert);
+      if (i >= 0) {
+        if (state.alerts[i].status !== ev.alert.status) fx.changed.add(ev.alert.id);
+        state.alerts[i] = ev.alert;
+      } else {
+        fx.fresh.add(ev.alert.id);
+        state.alerts.unshift(ev.alert);
+      }
     } else if (ev.type === 'devices') {
       [state.devices, state.groups] = await Promise.all([api('GET', '/api/devices'), api('GET', '/api/groups')]);
     }
@@ -137,19 +232,25 @@ function render() {
   top.hidden = false;
   const t = tab();
   document.querySelector('[data-tab=admin]').hidden = state.me.role !== 'admin';
-  for (const a of document.querySelectorAll('#tabs a')) a.classList.toggle('active', a.dataset.tab === t);
+  for (const a of document.querySelectorAll('#tabs a')) {
+    if (a.dataset.tab === t) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
+  placeIndicator();
+  shownTab = t;
   const view = { trigger: triggerView, history: historyView, settings: settingsView, admin: adminView }[t] || triggerView;
   app.replaceChildren(view());
+  fx.picked = '';
 }
 
 // ---------- login ----------
 
 function loginView() {
   const btn = el('div', { id: 'gsi' });
+  const actions = el('div', { class: 'actions' }, btn);
   const wrap = el('div', { class: 'login' },
-    el('img', { src: '/icons/icon-192.png', alt: '' }),
+    el('img', { src: '/icons/icon-192.png', alt: '', class: 'bell', onclick: (e) => play(e.currentTarget, 'ring', 1100) }),
     el('h1', {}, 'Attention Getter'),
-    btn,
+    actions,
   );
   const init = () => {
     if (!window.google?.accounts?.id) return setTimeout(init, 200);
@@ -160,21 +261,25 @@ function loginView() {
         state.me = await api('POST', '/auth/google', { credential: r.credential });
         await loadAll();
         render();
+        play(document.getElementById('top'), 'drop', 1000);
+        enterPage();
       }),
     });
-    google.accounts.id.renderButton(btn, { theme: 'filled_black', size: 'large', shape: 'pill', text: 'signin_with' });
+    google.accounts.id.renderButton(btn, { theme: 'outline', size: 'large', shape: 'rectangular', text: 'signin_with' });
   };
   init();
-  if (!state.config.google_client_id) wrap.append(el('p', { class: 'muted small' }, 'GOOGLE_CLIENT_ID is not configured on the server.'));
+  if (!state.config.google_client_id) actions.append(el('p', { class: 'muted small' }, 'GOOGLE_CLIENT_ID is not configured on the server.'));
   if (state.config.dev_login) {
-    const email = el('input', { type: 'email', placeholder: 'email (dev login)' });
-    wrap.append(el('div', { class: 'row' }, email, el('button', {
+    const email = el('input', { type: 'email', id: 'dev-email', placeholder: 'name@example.com' });
+    actions.append(el('div', { class: 'dev' }, el('label', { class: 'field', for: 'dev-email' }, 'Email (dev login)'), el('div', { class: 'row' }, email, el('button', {
       onclick: guard(async () => {
         state.me = await api('POST', '/auth/dev', { email: email.value });
         await loadAll();
         render();
+        play(document.getElementById('top'), 'drop', 1000);
+        enterPage();
       }),
-    }, 'Dev sign-in')));
+    }, 'Sign in'))));
   }
   return wrap;
 }
@@ -185,7 +290,7 @@ function triggerView() {
   const v = el('div');
   if (!state.devices.length) {
     v.append(el('div', { class: 'card' }, el('p', {}, 'No PCs are paired yet.'),
-      state.me.role === 'admin' ? el('p', { class: 'muted small' }, 'Go to Admin → PCs → Add PC.') : el('p', { class: 'muted small' }, 'Ask an admin to pair a PC.')));
+      el('p', { class: 'muted small' }, state.me.role === 'admin' ? 'Go to Admin, then PCs, then Add PC.' : 'Ask an admin to pair a PC.')));
     return v;
   }
   const groupSel = (g) => `g:${g.id}`;
@@ -194,43 +299,49 @@ function triggerView() {
   if (!validSel) state.sel.device = state.devices[0].name;
   if (state.types.length && !state.types.some((t) => String(t.id) === state.sel.type)) state.sel.type = String(state.types[0].id);
 
-  const pick = (key, val) => { state.sel[key] = val; localStorage.setItem('ag.' + key, val); render(); };
+  const pick = (key, val) => { state.sel[key] = val; localStorage.setItem('ag.' + key, val); fx.picked = `${key}:${val}`; render(); };
+  const popIf = (key, val) => (fx.picked === `${key}:${val}` ? ' pop' : '');
 
-  v.append(el('h2', {}, 'PC'));
   const chips = el('div', { class: 'chips' });
   for (const d of state.devices) {
-    chips.append(el('button', { class: 'chip', 'aria-pressed': String(state.sel.device === d.name), onclick: () => pick('device', d.name) },
-      el('span', { class: 'dot' + (d.online ? ' on' : ''), title: d.online ? 'online' : 'offline' }), d.name));
+    chips.append(el('button', { class: 'chip' + popIf('device', d.name), 'aria-pressed': String(state.sel.device === d.name), onclick: () => pick('device', d.name) },
+      dot(d.online), d.name));
   }
   for (const g of state.groups.filter((g) => g.device_ids.length)) {
     const online = state.devices.filter((d) => g.device_ids.includes(d.id) && d.online).length;
-    chips.append(el('button', { class: 'chip', 'aria-pressed': String(state.sel.device === groupSel(g)), onclick: () => pick('device', groupSel(g)),
+    chips.append(el('button', { class: 'chip' + popIf('device', groupSel(g)), 'aria-pressed': String(state.sel.device === groupSel(g)), onclick: () => pick('device', groupSel(g)),
       title: state.devices.filter((d) => g.device_ids.includes(d.id)).map((d) => d.name).join(', ') },
-    el('span', { class: 'dot' + (online ? ' on' : '') }), g.name, el('span', { class: 'muted small' }, `${online}/${g.device_ids.length}`)));
+    dot(online), g.name, el('span', { class: 'count' }, `${online}/${g.device_ids.length}`, el('span', { class: 'sr-only' }, ' online'))));
   }
   if (state.devices.length > 1) {
-    chips.append(el('button', { class: 'chip', 'aria-pressed': String(state.sel.device === 'all'), onclick: () => pick('device', 'all') }, 'All PCs'));
+    chips.append(el('button', { class: 'chip' + popIf('device', 'all'), 'aria-pressed': String(state.sel.device === 'all'), onclick: () => pick('device', 'all') }, 'All PCs'));
   }
-  v.append(chips);
+  v.append(el('h2', {}, 'PC'), chips);
 
   if (state.types.length) {
-    v.append(el('h2', {}, 'Type'));
     const grid = el('div', { class: 'types' });
     for (const t of state.types) {
-      grid.append(el('button', { class: 'type', 'aria-pressed': String(state.sel.type === String(t.id)), onclick: () => pick('type', String(t.id)) },
-        el('img', { src: mediaURL(t, 'gif'), alt: '', loading: 'lazy' }), el('span', {}, t.name)));
+      const on = state.sel.type === String(t.id);
+      grid.append(el('button', { class: 'type' + popIf('type', String(t.id)), 'aria-pressed': String(on), onclick: () => pick('type', String(t.id)) },
+        el('img', { src: mediaURL(t, 'gif'), alt: '', loading: 'lazy' }), el('span', {}, on ? icon('check') : null, t.name)));
     }
-    v.append(grid);
+    v.append(el('h2', {}, 'Type'), grid);
   }
 
-  v.append(el('h2', {}, 'Message (optional)'));
-  const msg = el('input', { type: 'text', maxlength: '200', placeholder: 'e.g. dinner is ready', enterkeyhint: 'send' });
+  const msg = el('input', { type: 'text', id: 'msg', maxlength: '200', placeholder: 'e.g. dinner is ready', enterkeyhint: 'send', 'aria-describedby': 'msg-hint' });
   const send = el('button', { class: 'primary big' }, 'Get their attention');
   const go = guard(async () => {
     send.disabled = true;
+    send.textContent = 'Sending…';
+    send.classList.add('sending');
     try {
       const target = state.sel.device.startsWith('g:') ? { group: Number(state.sel.device.slice(2)) } : { device: state.sel.device };
       const res = await api('POST', '/api/alerts', { ...target, type: state.sel.type, message: msg.value });
+      // The event stream may have delivered these already; only cue what it hasn't.
+      for (const x of res) {
+        if (!state.alerts.some((a) => a.id === x.alert_id)) fx.fresh.add(x.alert_id);
+        else if (x.merged) fx.changed.add(x.alert_id);
+      }
       state.lastAlertIds = res.map((r) => r.alert_id);
       msg.value = '';
       const missed = res.filter((r) => r.missed).map((r) => r.device);
@@ -238,19 +349,21 @@ function triggerView() {
       toast(missed.length === res.length ? `${missed.join(', ')} ${missed.length > 1 ? 'are' : 'is'} offline, not sent`
         : missed.length ? `Sent, but ${missed.join(', ')} offline`
           : queued.length ? `${queued.join(', ')} offline, will show when it reconnects`
-            : res.some((r) => r.merged) ? 'Added to the open alert' : 'Sent!');
+            : res.some((r) => r.merged) ? 'Added to the open alert' : 'Sent');
       state.alerts = await api('GET', '/api/alerts?limit=50');
       render();
-    } finally { send.disabled = false; }
+      if (missed.length < res.length) alarm(); else nope();
+    } finally { send.disabled = false; send.textContent = 'Get their attention'; send.classList.remove('sending'); }
   });
   msg.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
   send.addEventListener('click', go);
-  v.append(msg, el('div', { style: 'height:14px' }), send, liveStatus());
+  v.append(el('h2', {}, el('label', { for: 'msg' }, 'Message (optional)')), msg, el('div', { class: 'hint', id: 'msg-hint' }, 'Up to 200 characters.'),
+    send, liveStatus());
   return v;
 }
 
 function liveStatus() {
-  const box = el('div', { id: 'live', style: 'margin-top:16px' });
+  const box = el('div', { id: 'live' });
   const mine = state.alerts.filter((a) => state.lastAlertIds.includes(a.id) || (a.status === 'pending' || a.status === 'delivered'));
   for (const a of mine.slice(0, 4)) box.append(alertCard(a, true));
   return box;
@@ -265,24 +378,34 @@ const statusText = {
   missed: 'PC was offline, not delivered',
 };
 
+// Status tag: tone plus a word, never colour alone.
+const statusTag = {
+  pending: ['info', 'Waiting'],
+  delivered: ['live', 'On screen'],
+  replied: ['section', 'Replied'],
+  dismissed: ['neutral', 'Dismissed'],
+  cancelled: ['neutral', 'Cancelled'],
+  missed: ['correction', 'Not delivered'],
+};
+
 function alertCard(a, withCancel) {
   const online = state.devices.find((d) => d.id === a.device_id)?.online;
   const who = a.requests.map((r) => r.name).join(', ');
   const msgs = a.requests.filter((r) => r.message).map((r) => `${r.name}: “${r.message}”`);
-  const c = el('div', { class: `card status ${a.status}` },
-    el('div', { class: 'row' },
-      el('div', { class: 'grow' }, el('strong', {}, a.device_name), a.type_name ? el('span', { class: 'muted' }, ` · ${a.type_name}`) : null),
-      el('span', { class: 'muted small' }, ago(a.created))),
-    a.status === 'replied' ? el('div', { class: 'reply' }, a.reply) : el('div', { class: 'muted' },
+  const [tone, word] = statusTag[a.status] || ['neutral', a.status];
+  const cue = fx.fresh.delete(a.id) ? ' is-new' : fx.changed.delete(a.id) ? ' is-changed' : '';
+  const c = el('article', { class: `card alert ${a.status}${cue}` },
+    el('div', { class: 'alert-meta' }, tag(tone, word),
+      el('span', { class: 'dateline' }, [a.device_name, a.type_name, ago(a.created)].filter(Boolean).join(' · '))),
+    a.status === 'replied' ? el('p', { class: 'alert-title reply' }, a.reply) : el('p', { class: 'alert-title' },
       a.status === 'pending' && !online ? 'PC offline, will show when it reconnects' : statusText[a.status]),
-    el('div', { class: 'muted small' }, `by ${who}`, duration(a) ? ` · answered in ${duration(a)}` : ''),
-    msgs.length ? el('div', { class: 'small' }, msgs.join(' · ')) : null,
+    msgs.length ? el('p', { class: 'alert-quote' }, msgs.join(' · ')) : null,
+    el('div', { class: 'row' },
+      el('div', { class: 'grow muted small' }, `From ${who}`, duration(a) ? ` · answered in ${duration(a)}` : ''),
+      withCancel && (a.status === 'pending' || a.status === 'delivered')
+        ? el('button', { class: 'link', onclick: guard(async () => { await api('POST', `/api/alerts/${a.id}/cancel`); }) }, 'Cancel')
+        : null),
   );
-  if (withCancel && (a.status === 'pending' || a.status === 'delivered')) {
-    c.append(el('div', { style: 'margin-top:8px' }, el('button', {
-      class: 'link', onclick: guard(async () => { await api('POST', `/api/alerts/${a.id}/cancel`); }),
-    }, 'Cancel')));
-  }
   return c;
 }
 
@@ -299,7 +422,7 @@ function historyView() {
 
 function settingsView() {
   const v = el('div');
-  const nameInput = el('input', { type: 'text', maxlength: '40', value: state.me.display_name, placeholder: firstName(state.me.name || state.me.email) });
+  const nameInput = el('input', { type: 'text', id: 'display-name', 'aria-describedby': 'display-name-hint', maxlength: '40', value: state.me.display_name, placeholder: firstName(state.me.name || state.me.email) });
   const saveName = guard(async () => {
     state.me = await api('PATCH', '/api/me', { display_name: nameInput.value });
     toast(state.me.display_name ? `You'll show up as ${state.me.display_name}` : 'Using your Google name');
@@ -308,11 +431,12 @@ function settingsView() {
   nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveName(); });
   v.append(el('h2', {}, 'Account'), el('div', { class: 'card stack' },
     el('div', { class: 'row' },
-      state.me.picture ? el('img', { src: state.me.picture, alt: '', referrerpolicy: 'no-referrer', style: 'width:40px;height:40px;border-radius:50%' }) : null,
-      el('div', { class: 'grow' }, el('div', {}, shownName(state.me)), el('div', { class: 'muted small' }, state.me.email)),
+      state.me.picture ? el('img', { class: 'avatar', src: state.me.picture, alt: '', referrerpolicy: 'no-referrer' }) : null,
+      el('div', { class: 'grow' }, el('div', { class: 'item-name' }, shownName(state.me)), el('div', { class: 'dateline' }, state.me.email)),
       el('button', { onclick: guard(async () => { await api('POST', '/auth/logout'); state.me = null; es?.close(); render(); }) }, 'Sign out')),
-    el('div', {}, el('label', { class: 'field' }, 'Your name on the PC popup (leave empty to use your Google first name)'),
-      el('div', { class: 'row' }, el('div', { class: 'grow' }, nameInput), el('button', { onclick: saveName }, 'Save')))));
+    el('div', {}, el('label', { class: 'field', for: 'display-name' }, 'Your name on the PC popup'),
+      el('div', { class: 'row' }, el('div', { class: 'grow' }, nameInput), el('button', { onclick: saveName }, 'Save')),
+      el('div', { class: 'hint', id: 'display-name-hint' }, 'Leave it empty to use your Google first name.'))));
 
   v.append(el('h2', {}, 'Notifications'));
   const card = el('div', { class: 'card stack' });
@@ -339,8 +463,8 @@ function settingsView() {
   const prefs = [['mine', 'Replies to my requests'], ['all', 'Every reply'], ['none', 'Nothing']];
   card.append(el('div', {}, el('label', { class: 'field' }, 'Notify me about'),
     el('div', { class: 'chips' }, prefs.map(([val, label]) => el('button', {
-      class: 'chip', 'aria-pressed': String(state.me.notify_pref === val),
-      onclick: guard(async () => { state.me = await api('PATCH', '/api/me', { notify_pref: val }); render(); }),
+      class: 'chip' + (fx.picked === `pref:${val}` ? ' pop' : ''), 'aria-pressed': String(state.me.notify_pref === val),
+      onclick: guard(async () => { state.me = await api('PATCH', '/api/me', { notify_pref: val }); fx.picked = `pref:${val}`; render(); }),
     }, label)))));
   return v;
 }
@@ -403,7 +527,7 @@ function pcsSection(reload) {
   for (const d of state.devices) {
     const item = el('div', { class: 'item' });
     const show = () => item.replaceChildren(el('span', { class: 'dot' + (d.online ? ' on' : '') }),
-      el('div', { class: 'grow' }, el('div', {}, d.name), el('div', { class: 'muted small' }, d.online ? 'online' : `last seen ${ago(d.last_seen)}`)),
+      el('div', { class: 'grow' }, el('div', { class: 'item-name' }, d.name), el('div', { class: 'dateline' }, d.online ? 'Online' : `Last seen ${ago(d.last_seen)}`)),
       el('button', { class: 'link', onclick: edit }, 'Rename'),
       el('button', { class: 'link danger', onclick: guard(async () => {
         if (!confirm(`Remove ${d.name}? It will need to be paired again.`)) return;
@@ -428,7 +552,7 @@ function pcsSection(reload) {
   pair.append(el('button', { onclick: guard(async () => {
     const { code } = await api('POST', '/api/admin/pairing');
     pair.replaceChildren(installGuide(code));
-  }) }, '+ Add PC'));
+  }) }, 'Add PC'));
   list.append(pair);
   s.append(list, el('details', { class: 'card' }, el('summary', {}, 'Install or update the PC app'), installGuide(null)));
   return s;
@@ -459,7 +583,7 @@ function installGuide(code) {
     const copyable = (text, cls = 'mono') => el('div', { class: 'secret row' }, el('div', { class: `grow ${cls}` }, text), copyBtn(text));
     box.replaceChildren(
       el('div', { class: 'chips' }, Object.entries(INSTALL).map(([k, o]) => el('button', {
-        class: 'chip', 'aria-pressed': String(installOS === k), onclick: () => { installOS = k; draw(); },
+        class: 'chip', 'aria-pressed': String(installOS === k), onclick: () => { installOS = k; draw(); play(box.querySelector('.chip[aria-pressed=true]'), 'pop', 600); },
       }, o.label))),
       step(1, el('div', {}, os.shell), copyable(os.cmd)),
       code
@@ -467,7 +591,7 @@ function installGuide(code) {
           el('div', { class: 'muted small' }, 'Server URL'), copyable(location.origin),
           el('div', { class: 'muted small' }, 'Pairing code (expires in 15 minutes)'), copyable(code, 'code'),
           el('div', { class: 'muted small' }, 'Then give the PC a name, pick the monitor for the popup and the hotkey (F13 by default).'))
-        : step(2, el('div', {}, 'A new PC needs a pairing code: close this and tap ', el('strong', {}, '+ Add PC'), '.'),
+        : step(2, el('div', {}, 'A new PC needs a pairing code: close this and tap ', el('strong', {}, 'Add PC'), '.'),
           el('div', { class: 'muted small' }, 'To update a PC that is already set up, just run the command again; it keeps its pairing and settings.')),
       step(3, el('div', {}, code ? 'The PC shows up in this list as soon as it connects.' : 'The PC reconnects by itself after updating.'),
         el('div', { class: 'muted small' }, os.note)),
@@ -483,7 +607,7 @@ function groupsSection(reload) {
   const names = (ids) => state.devices.filter((d) => ids.includes(d.id)).map((d) => d.name).join(', ') || 'No PCs';
   for (const g of state.groups) {
     list.append(el('div', { class: 'item' },
-      el('div', { class: 'grow' }, el('div', {}, g.name), el('div', { class: 'muted small' }, names(g.device_ids))),
+      el('div', { class: 'grow' }, el('div', { class: 'item-name' }, g.name), el('div', { class: 'dateline' }, names(g.device_ids))),
       el('button', { class: 'link', onclick: () => list.replaceWith(groupForm(g, reload)) }, 'Edit'),
       el('button', { class: 'link danger', onclick: guard(async () => {
         if (!confirm(`Delete group ${g.name}? The PCs stay paired.`)) return;
@@ -491,7 +615,7 @@ function groupsSection(reload) {
       }) }, 'Delete')));
   }
   list.append(el('div', { class: 'item' },
-    el('button', { disabled: !state.devices.length, onclick: () => list.replaceWith(groupForm(null, reload)) }, '+ Add group'),
+    el('button', { disabled: !state.devices.length, onclick: () => list.replaceWith(groupForm(null, reload)) }, 'Add group'),
     state.groups.length ? null : el('div', { class: 'muted small grow' }, 'Trigger several PCs at once, e.g. “Upstairs”. Groups also work as pc=NAME in trigger URLs.')));
   s.append(list);
   return s;
@@ -506,7 +630,7 @@ function groupForm(g, reload) {
     await api(g ? 'PUT' : 'POST', g ? `/api/admin/groups/${g.id}` : '/api/admin/groups', { name: name.value, device_ids });
     toast('Saved'); await reload();
   }));
-  return el('div', { class: 'card stack' },
+  return el('div', { class: 'card stack pop-in' },
     el('div', {}, el('label', { class: 'field' }, 'Name'), name),
     el('div', {}, el('label', { class: 'field' }, 'PCs in this group'),
       boxes.map(({ d, box }) => el('label', { class: 'check' }, box, d.name))),
@@ -537,15 +661,18 @@ function typesSection(reload) {
   for (const t of state.types) {
     const audio = el('audio', { src: mediaURL(t, 'sound'), preload: 'none' });
     list.append(el('div', { class: 'item' }, el('img', { src: mediaURL(t, 'gif'), alt: '', loading: 'lazy' }),
-      el('div', { class: 'grow' }, t.name, audio),
-      el('button', { class: 'link', onclick: () => (audio.paused ? audio.play() : audio.pause()) }, '▶︎'),
+      el('div', { class: 'grow item-name' }, t.name, audio),
+      el('button', { class: 'link', onclick: (e) => {
+        const b = e.currentTarget;
+        if (audio.paused) { audio.play(); b.textContent = 'Stop'; audio.onended = () => { b.textContent = 'Play'; }; } else { audio.pause(); audio.currentTime = 0; b.textContent = 'Play'; }
+      } }, 'Play'),
       el('button', { class: 'link', onclick: () => list.replaceWith(typeForm(t, reload)) }, 'Edit'),
       el('button', { class: 'link danger', onclick: guard(async () => {
         if (!confirm(`Delete type ${t.name}?`)) return;
         await api('DELETE', `/api/admin/types/${t.id}`); await reload();
       }) }, 'Delete')));
   }
-  list.append(el('div', { class: 'item' }, el('button', { onclick: () => list.replaceWith(typeForm(null, reload)) }, '+ Add type')));
+  list.append(el('div', { class: 'item' }, el('button', { onclick: () => list.replaceWith(typeForm(null, reload)) }, 'Add type')));
   s.append(list);
   return s;
 }
@@ -567,7 +694,7 @@ function typeForm(t, reload) {
       await reload();
     } finally { save.disabled = false; }
   }));
-  return el('div', { class: 'card stack' },
+  return el('div', { class: 'card stack pop-in' },
     el('div', {}, el('label', { class: 'field' }, 'Name'), name),
     el('div', {}, el('label', { class: 'field' }, t ? 'GIF (leave empty to keep)' : 'GIF (max 20 MB)'), gif),
     el('div', {}, el('label', { class: 'field' }, t ? 'Sound (leave empty to keep)' : 'Sound: mp3, ogg, wav or flac (max 5 MB)'), sound),
@@ -582,17 +709,17 @@ function keysSection(reload) {
   for (const k of state.admin.keys) {
     const pins = [k.pinned_device && `PC: ${devName(k.pinned_device)}`, k.pinned_type && `type: ${typeName(k.pinned_type)}`].filter(Boolean).join(', ');
     list.append(el('div', { class: 'item' },
-      el('div', { class: 'grow' }, el('div', {}, k.name), el('div', { class: 'muted small' }, [pins, `used ${ago(k.last_used)}`].filter(Boolean).join(' · '))),
+      el('div', { class: 'grow' }, el('div', { class: 'item-name' }, k.name), el('div', { class: 'dateline' }, [pins, `used ${ago(k.last_used)}`].filter(Boolean).join(' · '))),
       el('button', { class: 'link danger', onclick: guard(async () => {
         if (!confirm(`Revoke key ${k.name}?`)) return;
         await api('DELETE', `/api/admin/keys/${k.id}`); await reload();
       }) }, 'Revoke')));
   }
-  const name = el('input', { type: 'text', placeholder: 'Name shown in popup, e.g. Alexa' });
-  const pc = el('select', {}, el('option', { value: '' }, 'Any PC (use ?pc=)'), state.devices.map((d) => el('option', { value: d.id }, d.name)));
-  const type = el('select', {}, el('option', { value: '' }, 'Any type (use ?type=)'), state.types.map((t) => el('option', { value: t.id }, t.name)));
+  const name = el('input', { type: 'text', id: 'key-name', placeholder: 'e.g. Alexa' });
+  const pc = el('select', { id: 'key-pc' }, el('option', { value: '' }, 'Any PC (use ?pc=)'), state.devices.map((d) => el('option', { value: d.id }, d.name)));
+  const type = el('select', { id: 'key-type' }, el('option', { value: '' }, 'Any type (use ?type=)'), state.types.map((t) => el('option', { value: t.id }, t.name)));
   const out = el('div');
-  const create = el('button', { class: 'primary', onclick: guard(async () => {
+  const create = el('button', { onclick: guard(async () => {
     const { key } = await api('POST', '/api/admin/keys', {
       name: name.value, pinned_device: pc.value ? Number(pc.value) : null, pinned_type: type.value ? Number(type.value) : null,
     });
@@ -601,9 +728,11 @@ function keysSection(reload) {
     out.replaceChildren(el('div', { class: 'stack' },
       el('div', { class: 'small' }, 'POST to this URL. It is shown only once, so copy it now. Optional params: &pc=NAME|all &type=NAME &message=TEXT'),
       el('div', { class: 'mono secret' }, url),
-      el('button', { onclick: () => navigator.clipboard.writeText(url).then(() => toast('Copied')) }, 'Copy URL')));
+      el('div', {}, el('button', { onclick: () => navigator.clipboard.writeText(url).then(() => toast('Copied')) }, 'Copy URL'))));
   }) }, 'Create key');
-  list.append(el('div', { class: 'item' }, el('div', { class: 'stack grow' }, name, pc, type, create, out)));
+  const field = (id, label, input) => el('div', {}, el('label', { class: 'field', for: id }, label), input);
+  list.append(el('div', { class: 'item' }, el('div', { class: 'stack grow' },
+    field('key-name', 'Name shown in the popup', name), field('key-pc', 'PC', pc), field('key-type', 'Type', type), el('div', {}, create), out)));
   s.append(list);
   return s;
 }
@@ -614,8 +743,8 @@ function usersSection(reload) {
   for (const u of state.admin.users) {
     const self = u.email === state.me.email;
     list.append(el('div', { class: 'item' },
-      el('div', { class: 'grow' }, el('div', {}, shownName(u)), el('div', { class: 'muted small' }, u.display_name && u.name ? `${u.email} · Google: ${u.name}` : u.email)),
-      el('span', { class: 'badge' + (u.role === 'admin' ? ' warn' : '') }, u.role),
+      el('div', { class: 'grow' }, el('div', { class: 'item-name' }, shownName(u)), el('div', { class: 'dateline' }, u.display_name && u.name ? `${u.email} · Google: ${u.name}` : u.email)),
+      u.role === 'admin' ? tag('info', 'Admin') : tag('neutral', 'User'),
       self ? null : el('button', { class: 'link', onclick: guard(async () => {
         await api('POST', '/api/admin/users', { email: u.email, role: u.role === 'admin' ? 'user' : 'admin' }); await reload();
       }) }, u.role === 'admin' ? 'Make user' : 'Make admin'),
@@ -624,8 +753,8 @@ function usersSection(reload) {
         await api('DELETE', `/api/admin/users/${encodeURIComponent(u.email)}`); await reload();
       }) }, 'Remove')));
   }
-  const email = el('input', { type: 'email', placeholder: 'name@gmail.com' });
-  list.append(el('div', { class: 'item' }, el('div', { class: 'grow' }, email), el('button', { onclick: guard(async () => {
+  const email = el('input', { type: 'email', id: 'add-user', placeholder: 'name@gmail.com' });
+  list.append(el('div', { class: 'item' }, el('div', { class: 'grow' }, el('label', { class: 'field', for: 'add-user' }, 'Add a Google account'), email), el('button', { onclick: guard(async () => {
     await api('POST', '/api/admin/users', { email: email.value, role: 'user' }); await reload();
   }) }, 'Add')));
   s.append(list);
@@ -633,13 +762,13 @@ function usersSection(reload) {
 }
 
 function presetsSection(reload) {
-  const ta = el('textarea', { placeholder: 'One per line (max 9)' });
+  const ta = el('textarea', { placeholder: 'One per line (max 9)', 'aria-label': 'Quick replies' });
   ta.value = state.presets.join('\n');
   return el('div', {}, el('h2', {}, 'Quick replies (keys 1–9 in the popup)'), el('div', { class: 'card stack' }, ta,
-    el('button', { onclick: guard(async () => {
+    el('div', {}, el('button', { onclick: guard(async () => {
       await api('PUT', '/api/admin/presets', ta.value.split('\n'));
       toast('Saved'); await reload();
-    }) }, 'Save')));
+    }) }, 'Save'))));
 }
 
 boot().catch((e) => {
