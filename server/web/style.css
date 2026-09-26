@@ -263,6 +263,11 @@ label.check input { width: 20px; height: 20px; accent-color: var(--fern); flex: 
 .item img { width: 60px; height: 40px; object-fit: cover; background: var(--wash-leaf); }
 .item .actions { display: flex; gap: var(--space-2); margin-left: auto; }
 
+/* The OSes of a dual-boot PC, hung under it like sub-entries. */
+.installs { flex-basis: 100%; margin: var(--space-1) 0 0 4px; padding-left: var(--space-4); border-left: var(--line-rule) solid var(--rule); }
+.installs > .item { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); align-items: center; padding: var(--space-1) 0; }
+.install-name { font: 600 15px/20px var(--font-sans); overflow-wrap: anywhere; }
+
 .code { font: 500 28px/1.2 var(--font-mono); letter-spacing: .15em; }
 .mono { font: 400 13px/20px var(--font-mono); word-break: break-all; }
 .secret {
@@ -300,7 +305,7 @@ button, nav a, .chip, .type, summary { touch-action: manipulation; }
   .types { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
   /* Admin rows: actions drop under the name instead of squeezing it. */
   .list > .item > .grow { flex-basis: 100%; }
-  .list > .item > .dot + .grow { flex-basis: calc(100% - 24px); }
+  .list > .item > .dot + .grow, .installs > .item > .dot + .grow { flex-basis: calc(100% - 24px); }
   .list > .item > img + .grow { flex-basis: calc(100% - 76px); }
   .list > .item:has(label.field) > .grow { flex-basis: 100%; }
   .list > .item:has(label.field) > button { width: 100%; }

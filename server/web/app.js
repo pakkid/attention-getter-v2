@@ -304,8 +304,9 @@ function triggerView() {
 
   const chips = el('div', { class: 'chips' });
   for (const d of state.devices) {
-    chips.append(el('button', { class: 'chip' + popIf('device', d.name), 'aria-pressed': String(state.sel.device === d.name), onclick: () => pick('device', d.name) },
-      dot(d.online), d.name));
+    const via = (d.installs || []).length > 1 ? d.installs.find((i) => i.online) : null;
+    chips.append(el('button', { class: 'chip' + popIf('device', d.name), 'aria-pressed': String(state.sel.device === d.name), onclick: () => pick('device', d.name),
+      title: via ? `Running ${installName(via)}` : null }, dot(d.online), d.name));
   }
   for (const g of state.groups.filter((g) => g.device_ids.length)) {
     const online = state.devices.filter((d) => g.device_ids.includes(d.id) && d.online).length;
@@ -521,18 +522,29 @@ function adminView() {
   return v;
 }
 
+const OS_NAMES = { linux: 'Linux', windows: 'Windows' };
+// An install is named by its OS when the client reports it (1.1.0+), else by the name it was paired under.
+const installName = (i) => OS_NAMES[i.os] || i.label;
+
 function pcsSection(reload) {
   const s = el('div', {}, el('h2', {}, 'PCs'));
   const list = el('div', { class: 'card list' });
   for (const d of state.devices) {
     const item = el('div', { class: 'item' });
-    const show = () => item.replaceChildren(el('span', { class: 'dot' + (d.online ? ' on' : '') }),
-      el('div', { class: 'grow' }, el('div', { class: 'item-name' }, d.name), el('div', { class: 'dateline' }, d.online ? 'Online' : `Last seen ${ago(d.last_seen)}`)),
+    const installs = d.installs || [];
+    const via = installs.length > 1 ? installs.find((i) => i.online) : null;
+    const status = d.online ? (via ? `Online on ${installName(via)}` : 'Online')
+      : installs.length ? `Last seen ${ago(d.last_seen)}` : 'No install left: pair it again or remove it';
+    // replaceChildren would print null as text; filter the optional pieces out.
+    const show = () => item.replaceChildren(...[el('span', { class: 'dot' + (d.online ? ' on' : '') }),
+      el('div', { class: 'grow' }, el('div', { class: 'item-name' }, d.name), el('div', { class: 'dateline' }, status)),
       el('button', { class: 'link', onclick: edit }, 'Rename'),
+      state.devices.length > 1 ? el('button', { class: 'link', onclick: merge }, 'Merge') : null,
       el('button', { class: 'link danger', onclick: guard(async () => {
         if (!confirm(`Remove ${d.name}? It will need to be paired again.`)) return;
         await api('DELETE', `/api/admin/devices/${d.id}`); await reload();
-      }) }, 'Remove'));
+      }) }, 'Remove'),
+      installs.length > 1 ? installList(d, reload) : null].filter(Boolean));
     function edit() {
       const name = el('input', { type: 'text', value: d.name, maxlength: '40' });
       const save = guard(async () => {
@@ -545,6 +557,26 @@ function pcsSection(reload) {
       name.focus();
       name.select();
     }
+    function merge() {
+      const others = state.devices.filter((o) => o.id !== d.id);
+      // Preselect the likeliest partner: the longest shared name prefix ("gaming-win" → "gaming").
+      const shared = (o) => { let n = 0; while (n < o.name.length && o.name[n].toLowerCase() === d.name[n]?.toLowerCase()) n++; return n; };
+      const guess = others.reduce((best, o) => (shared(o) > shared(best) ? o : best), others[0]);
+      const into = el('select', { id: `merge-${d.id}` }, others.map((o) => el('option', { value: o.id, selected: o === guess }, o.name)));
+      const go = guard(async () => {
+        const target = others.find((o) => o.id === Number(into.value));
+        await api('POST', `/api/admin/devices/${d.id}/merge`, { into: target.id });
+        toast(`Merged into ${target.name}`);
+        state.alerts = await api('GET', '/api/alerts?limit=50');
+        await reload();
+      });
+      item.replaceChildren(el('div', { class: 'stack grow pop-in' },
+        el('div', {}, el('label', { class: 'field', for: `merge-${d.id}` }, `Merge ${d.name} into`), into),
+        el('div', { class: 'muted small' }, 'For a dual-boot PC paired once from each OS: they become one PC, and whichever OS is running is the one that’s online. ',
+          `${d.name}’s history, groups and trigger keys move over. You can split it off again later.`),
+        el('div', { class: 'row' }, el('button', { class: 'primary', onclick: go }, 'Merge'), el('button', { onclick: show }, 'Cancel'))));
+      into.focus();
+    }
     show();
     list.append(item);
   }
@@ -556,6 +588,40 @@ function pcsSection(reload) {
   list.append(pair);
   s.append(list, el('details', { class: 'card' }, el('summary', {}, 'Install or update the PC app'), installGuide(null)));
   return s;
+}
+
+// The OSes of a merged (dual-boot) PC, each with its own pairing.
+function installList(d, reload) {
+  const box = el('div', { class: 'installs' });
+  for (const i of d.installs) {
+    const row = el('div', { class: 'item' });
+    const name = installName(i);
+    const show = () => row.replaceChildren(el('span', { class: 'dot' + (i.online ? ' on' : '') }),
+      el('div', { class: 'grow' }, el('div', { class: 'install-name' }, name), el('div', { class: 'dateline' }, [
+        i.os && i.label !== d.name ? `paired as ${i.label}` : null, i.version ? `v${i.version}` : null,
+        i.online ? 'Online' : `Last seen ${ago(i.last_seen)}`,
+      ].filter(Boolean).join(' · '))),
+      el('button', { class: 'link', onclick: split }, 'Split off'),
+      el('button', { class: 'link danger', onclick: guard(async () => {
+        if (!confirm(`Remove ${name} from ${d.name}? That OS will need to be paired again.`)) return;
+        await api('DELETE', `/api/admin/devices/${d.id}/installs/${i.id}`); await reload();
+      }) }, 'Remove'));
+    function split() {
+      const input = el('input', { type: 'text', maxlength: '40', 'aria-label': `New PC name for ${name}`,
+        value: i.label !== d.name ? i.label : `${d.name}-${(i.os || 'other')}` });
+      const save = guard(async () => {
+        await api('POST', `/api/admin/devices/${d.id}/installs/${i.id}/split`, { name: input.value });
+        toast(`${input.value.trim()} is its own PC again`); await reload();
+      });
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') show(); });
+      row.replaceChildren(el('div', { class: 'grow' }, input), el('button', { class: 'primary', onclick: save }, 'Split'), el('button', { onclick: show }, 'Cancel'));
+      input.focus();
+      input.select();
+    }
+    show();
+    box.append(row);
+  }
+  return box;
 }
 
 const INSTALL = {
@@ -590,7 +656,8 @@ function installGuide(code) {
         ? step(2, el('div', {}, 'When setup asks, enter:'),
           el('div', { class: 'muted small' }, 'Server URL'), copyable(location.origin),
           el('div', { class: 'muted small' }, 'Pairing code (expires in 15 minutes)'), copyable(code, 'code'),
-          el('div', { class: 'muted small' }, 'Then give the PC a name, pick the monitor for the popup and the hotkey (F13 by default).'))
+          el('div', { class: 'muted small' }, 'Then give the PC a name, pick the monitor for the popup and the hotkey (F13 by default).'),
+          el('div', { class: 'muted small' }, 'Dual-boot PC? Pair each OS with the same name and they show up as one PC.'))
         : step(2, el('div', {}, 'A new PC needs a pairing code: close this and tap ', el('strong', {}, 'Add PC'), '.'),
           el('div', { class: 'muted small' }, 'To update a PC that is already set up, just run the command again; it keeps its pairing and settings.')),
       step(3, el('div', {}, code ? 'The PC shows up in this list as soon as it connects.' : 'The PC reconnects by itself after updating.'),

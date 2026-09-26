@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func (f *fakeNotifier) Send(_ context.Context, emails []string, msg push.Message
 	f.sent <- sent{emails, msg}
 }
 
-func setup(t *testing.T) (*Hub, *store.Store, *fakeNotifier, int64) {
+func setup(t *testing.T) (*Hub, *store.Store, *fakeNotifier, int64, int64) {
 	t.Helper()
 	st, err := store.Open(":memory:")
 	if err != nil {
@@ -44,12 +45,12 @@ func setup(t *testing.T) (*Hub, *store.Store, *fakeNotifier, int64) {
 		}
 	}
 	code, _ := st.CreatePairingCode(ctx, "mom@x.com")
-	dev, _, err := st.PairDevice(ctx, code, "desktop")
+	p, err := st.PairDevice(ctx, code, "desktop", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	n := &fakeNotifier{sent: make(chan sent, 4)}
-	return New(st, n), st, n, dev
+	return New(st, n), st, n, p.DeviceID, p.InstallID
 }
 
 func recv(t *testing.T, c *Conn) ServerMsg {
@@ -68,9 +69,9 @@ func recv(t *testing.T, c *Conn) ServerMsg {
 }
 
 func TestMergeAndNotifyRouting(t *testing.T) {
-	h, st, n, dev := setup(t)
+	h, st, n, dev, inst := setup(t)
 	ctx := context.Background()
-	conn := h.Attach(ctx, dev)
+	conn := h.Attach(ctx, dev, inst)
 
 	keyOwnerKey, _ := st.CreateAPIKey(ctx, "Alexa", "dad@x.com", nil, nil)
 	k, err := st.APIKeyBySecret(ctx, keyOwnerKey)
@@ -97,10 +98,10 @@ func TestMergeAndNotifyRouting(t *testing.T) {
 		t.Fatalf("unexpected merge message: %+v", m)
 	}
 
-	if err := h.HandleDeviceMessage(ctx, dev, []byte(`{"op":"ack","alert_id":1}`)); err != nil {
+	if err := h.HandleDeviceMessage(ctx, dev, inst, []byte(`{"op":"ack","alert_id":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.HandleDeviceMessage(ctx, dev, []byte(`{"op":"reply","alert_id":1,"text":"5 min"}`)); err != nil {
+	if err := h.HandleDeviceMessage(ctx, dev, inst, []byte(`{"op":"reply","alert_id":1,"text":"5 min"}`)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -117,7 +118,7 @@ func TestMergeAndNotifyRouting(t *testing.T) {
 	}
 
 	// A duplicate reply after reconnect is ignored; a new trigger opens a fresh alert.
-	if err := h.HandleDeviceMessage(ctx, dev, []byte(`{"op":"reply","alert_id":1,"text":"again"}`)); err != nil {
+	if err := h.HandleDeviceMessage(ctx, dev, inst, []byte(`{"op":"reply","alert_id":1,"text":"again"}`)); err != nil {
 		t.Fatal(err)
 	}
 	a3, err := h.Trigger(ctx, dev, nil, store.Requester{Email: "sis@x.com", Name: "Sis"}, "")
@@ -130,7 +131,7 @@ func TestMergeAndNotifyRouting(t *testing.T) {
 }
 
 func TestOfflineDeliveryOnReconnect(t *testing.T) {
-	h, st, _, dev := setup(t)
+	h, st, _, dev, inst := setup(t)
 	ctx := context.Background()
 	if err := st.SaveSettings(ctx, store.Settings{DeliverOffline: true}); err != nil {
 		t.Fatal(err)
@@ -142,16 +143,16 @@ func TestOfflineDeliveryOnReconnect(t *testing.T) {
 	if h.Online(dev) {
 		t.Fatal("device should be offline")
 	}
-	conn := h.Attach(ctx, dev)
+	conn := h.Attach(ctx, dev, inst)
 	if m := recv(t, conn); m.Op != "alert" || m.Alert.ID != a.ID {
 		t.Fatalf("expected queued alert on connect, got %+v", m)
 	}
 }
 
 func TestCancel(t *testing.T) {
-	h, st, _, dev := setup(t)
+	h, st, _, dev, inst := setup(t)
 	ctx := context.Background()
-	conn := h.Attach(ctx, dev)
+	conn := h.Attach(ctx, dev, inst)
 	a, _ := h.Trigger(ctx, dev, nil, store.Requester{Email: "mom@x.com", Name: "Mom"}, "")
 	recv(t, conn)
 	if err := h.Cancel(ctx, a.ID); err != nil {
@@ -167,7 +168,7 @@ func TestCancel(t *testing.T) {
 }
 
 func TestOfflineMissedByDefault(t *testing.T) {
-	h, st, _, dev := setup(t)
+	h, st, _, dev, inst := setup(t)
 	ctx := context.Background()
 	a, err := h.Trigger(ctx, dev, nil, store.Requester{Email: "mom@x.com", Name: "Mom"}, "hi")
 	if err != nil {
@@ -181,7 +182,7 @@ func TestOfflineMissedByDefault(t *testing.T) {
 	if b.ID == a.ID || b.Status != store.StatusMissed {
 		t.Fatalf("expected a separate missed alert, got %+v", b)
 	}
-	conn := h.Attach(ctx, dev)
+	conn := h.Attach(ctx, dev, inst)
 	select {
 	case m := <-conn.Send:
 		t.Fatalf("missed alerts must not be delivered on reconnect, got %s", m)
@@ -193,7 +194,7 @@ func TestOfflineMissedByDefault(t *testing.T) {
 }
 
 func TestExpireOfflineWhenSettingTurnedOff(t *testing.T) {
-	h, st, _, dev := setup(t)
+	h, st, _, dev, inst := setup(t)
 	ctx := context.Background()
 	_ = st.SaveSettings(ctx, store.Settings{DeliverOffline: true})
 	queued, _ := h.Trigger(ctx, dev, nil, store.Requester{Email: "mom@x.com", Name: "Mom"}, "")
@@ -209,9 +210,84 @@ func TestExpireOfflineWhenSettingTurnedOff(t *testing.T) {
 		t.Fatalf("status = %s, want missed", got.Status)
 	}
 	// An online PC's alerts are delivered normally with the setting off.
-	conn := h.Attach(ctx, dev)
+	conn := h.Attach(ctx, dev, inst)
 	a, _ := h.Trigger(ctx, dev, nil, store.Requester{Email: "mom@x.com", Name: "Mom"}, "")
 	if m := recv(t, conn); m.Op != "alert" || m.Alert.ID != a.ID {
 		t.Fatalf("expected live delivery, got %+v", m)
+	}
+}
+
+func TestDualBootInstalls(t *testing.T) {
+	h, st, _, dev, linux := setup(t)
+	ctx := context.Background()
+	// The Windows side pairs as its own PC first, then gets merged into desktop.
+	code, _ := st.CreatePairingCode(ctx, "mom@x.com")
+	win, err := st.PairDevice(ctx, code, "desktop-win", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wconn := h.Attach(ctx, win.DeviceID, win.InstallID)
+	_ = st.SaveSettings(ctx, store.Settings{DeliverOffline: true})
+	stale, _ := h.Trigger(ctx, win.DeviceID, nil, store.Requester{Email: "mom@x.com", Name: "Mom"}, "")
+	recv(t, wconn)
+	_ = st.SaveSettings(ctx, store.Settings{DeliverOffline: false})
+
+	if err := h.Merge(ctx, win.DeviceID, dev); err != nil {
+		t.Fatal(err)
+	}
+	if m := recv(t, wconn); m.Op != "cancel" || m.AlertID != stale.ID {
+		t.Fatalf("merged-away PC's open alert should be cancelled, got %+v", m)
+	}
+	select {
+	case <-wconn.Done:
+	case <-time.After(time.Second):
+		t.Fatal("merged-away connection should be closed")
+	}
+	if h.Online(win.DeviceID) || h.Online(dev) {
+		t.Fatal("nothing should be online right after the merge")
+	}
+	if d, err := st.DeviceByToken(ctx, win.Token); err != nil || d.ID != dev || d.InstallID != win.InstallID {
+		t.Fatalf("windows token should now open desktop: %+v, %v", d, err)
+	}
+
+	// Windows boots: the PC is online and gets alerts, the Linux install is not connected.
+	wconn = h.Attach(ctx, dev, win.InstallID)
+	if !h.Online(dev) || h.InstallOnline(dev, linux) || !h.InstallOnline(dev, win.InstallID) {
+		t.Fatal("expected only the windows install online")
+	}
+	a, _ := h.Trigger(ctx, dev, nil, store.Requester{Email: "mom@x.com", Name: "Mom"}, "")
+	if m := recv(t, wconn); m.Op != "alert" || m.Alert.ID != a.ID {
+		t.Fatalf("expected alert on windows, got %+v", m)
+	}
+
+	// Both connected at once (e.g. a stale socket): a reply on one closes the popup on the other.
+	lconn := h.Attach(ctx, dev, linux)
+	if m := recv(t, lconn); m.Op != "alert" || m.Alert.ID != a.ID {
+		t.Fatalf("expected the open alert on linux too, got %+v", m)
+	}
+	if err := h.HandleDeviceMessage(ctx, dev, win.InstallID, []byte(fmt.Sprintf(`{"op":"reply","alert_id":%d,"text":"ok"}`, a.ID))); err != nil {
+		t.Fatal(err)
+	}
+	if m := recv(t, lconn); m.Op != "cancel" || m.AlertID != a.ID {
+		t.Fatalf("expected cancel on linux, got %+v", m)
+	}
+	select {
+	case m := <-wconn.Send:
+		t.Fatalf("the install that replied needs no cancel, got %s", m)
+	default:
+	}
+	// A reconnect of one install doesn't drop the other.
+	lconn2 := h.Attach(ctx, dev, linux)
+	if !h.InstallOnline(dev, win.InstallID) {
+		t.Fatal("windows should still be connected")
+	}
+	h.Detach(dev, linux, lconn) // the replaced socket closing late changes nothing
+	if !h.InstallOnline(dev, linux) {
+		t.Fatal("linux reconnection should survive the old socket's detach")
+	}
+	h.Detach(dev, linux, lconn2)
+	h.Detach(dev, win.InstallID, wconn)
+	if h.Online(dev) {
+		t.Fatal("expected offline")
 	}
 }

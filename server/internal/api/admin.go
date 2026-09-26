@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"attention-getter/server/internal/media"
@@ -296,6 +297,112 @@ func (s *Server) adminRenameDevice(w http.ResponseWriter, r *http.Request, u *st
 		internalError(w, err)
 		return
 	}
+	s.Hub.DevicesChanged()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminMergeDevice folds PC {id} into another: {into}. Used for a dual-boot PC whose OSes were
+// paired as two PCs; {id} disappears and its installs connect as {into}.
+func (s *Server) adminMergeDevice(w http.ResponseWriter, r *http.Request, u *store.User) {
+	id, ok := pathID(r)
+	if !ok {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var body struct {
+		Into int64 `json:"into"`
+	}
+	if err := readJSON(r, &body); err != nil || body.Into == 0 || body.Into == id {
+		httpError(w, http.StatusBadRequest, "pick another PC to merge into")
+		return
+	}
+	ds, err := s.St.ListDevices(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	found := 0
+	for _, d := range ds {
+		if d.ID == id || d.ID == body.Into {
+			found++
+		}
+	}
+	if found != 2 {
+		httpError(w, http.StatusNotFound, "no such PC")
+		return
+	}
+	if err := s.Hub.Merge(r.Context(), id, body.Into); err != nil {
+		internalError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// installPath reads {id} and {install} from the URL.
+func installPath(w http.ResponseWriter, r *http.Request) (int64, int64, bool) {
+	id, ok := pathID(r)
+	install, err := strconv.ParseInt(r.PathValue("install"), 10, 64)
+	if !ok || err != nil {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return 0, 0, false
+	}
+	return id, install, true
+}
+
+func installError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		httpError(w, http.StatusNotFound, "no such install")
+	case errors.Is(err, store.ErrLastInstall):
+		httpError(w, http.StatusConflict, "this is the PC's only install; remove the PC instead")
+	default:
+		internalError(w, err)
+	}
+}
+
+// adminSplitInstall moves one install of a PC into a new PC: {name}. Undoes a merge.
+func (s *Server) adminSplitInstall(w http.ResponseWriter, r *http.Request, u *store.User) {
+	id, install, ok := installPath(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	name, status, msg := s.validName(r.Context(), body.Name, 0, 0)
+	if status != 0 {
+		httpError(w, status, msg)
+		return
+	}
+	newID, err := s.St.SplitInstall(r.Context(), id, install, name)
+	if errors.Is(err, store.ErrConflict) {
+		httpError(w, http.StatusConflict, "a PC is already called "+name)
+		return
+	}
+	if err != nil {
+		installError(w, err)
+		return
+	}
+	s.Hub.KickInstall(id, install) // it reconnects as the new PC
+	s.Hub.DevicesChanged()
+	writeJSON(w, http.StatusOK, map[string]int64{"id": newID})
+}
+
+// adminRemoveInstall revokes one install of a PC; that OS has to pair again.
+func (s *Server) adminRemoveInstall(w http.ResponseWriter, r *http.Request, u *store.User) {
+	id, install, ok := installPath(w, r)
+	if !ok {
+		return
+	}
+	if err := s.St.RemoveInstall(r.Context(), id, install); err != nil {
+		installError(w, err)
+		return
+	}
+	s.Hub.KickInstall(id, install)
 	s.Hub.DevicesChanged()
 	w.WriteHeader(http.StatusNoContent)
 }

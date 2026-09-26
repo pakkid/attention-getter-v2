@@ -72,8 +72,9 @@ func (s *Server) trigger(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) devicePair(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Code string `json:"code"`
-		Name string `json:"name"`
+		Code     string `json:"code"`
+		Name     string `json:"name"`
+		Replaces string `json:"replaces"` // the client's old token when re-pairing (1.1.0+)
 	}
 	if err := readJSON(r, &body); err != nil {
 		httpError(w, http.StatusBadRequest, "bad body")
@@ -84,14 +85,15 @@ func (s *Server) devicePair(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid PC name")
 		return
 	}
-	// Re-pairing under an existing name (any case) takes over that PC; a group name can't be used.
+	// Pairing under an existing name (any case) adds an install to that PC, e.g. the other OS of a
+	// dual-boot PC. A group name can't be used.
 	if d, err := s.St.DeviceByName(r.Context(), body.Name); err == nil {
 		body.Name = d.Name
 	} else if _, _, err := s.St.GroupByName(r.Context(), body.Name); err == nil {
 		httpError(w, http.StatusConflict, "a group is already called "+body.Name+"; pick another PC name")
 		return
 	}
-	id, tok, err := s.St.PairDevice(r.Context(), body.Code, body.Name)
+	p, err := s.St.PairDevice(r.Context(), body.Code, body.Name, body.Replaces)
 	if errors.Is(err, store.ErrNotFound) {
 		httpError(w, http.StatusForbidden, "pairing code invalid or expired")
 		return
@@ -100,8 +102,11 @@ func (s *Server) devicePair(w http.ResponseWriter, r *http.Request) {
 		internalError(w, err)
 		return
 	}
-	s.Hub.Kick(id) // a re-paired PC invalidates the old token's connection
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "token": tok, "name": body.Name})
+	if p.ReplacedInstall != 0 {
+		s.Hub.KickInstall(p.ReplacedDevice, p.ReplacedInstall) // the old token no longer works
+	}
+	s.Hub.DevicesChanged()
+	writeJSON(w, http.StatusOK, map[string]any{"id": p.DeviceID, "token": p.Token, "name": body.Name})
 }
 
 type manifest struct {
@@ -153,11 +158,13 @@ func (s *Server) deviceWS(w http.ResponseWriter, r *http.Request, d *store.Devic
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	conn := s.Hub.Attach(ctx, d.ID)
-	defer s.Hub.Detach(d.ID, conn)
-	_ = s.St.TouchDevice(ctx, d.ID)
-	slog.Info("pc connected", "pc", d.Name)
-	defer slog.Info("pc disconnected", "pc", d.Name)
+	agent := r.Header.Get("User-Agent")
+	_ = s.St.SetInstallAgent(ctx, d.InstallID, agent)
+	_ = s.St.TouchDevice(ctx, d)
+	conn := s.Hub.Attach(ctx, d.ID, d.InstallID)
+	defer s.Hub.Detach(d.ID, d.InstallID, conn)
+	slog.Info("pc connected", "pc", d.Name, "install", d.InstallID, "agent", agent)
+	defer slog.Info("pc disconnected", "pc", d.Name, "install", d.InstallID)
 
 	go func() {
 		defer cancel()
@@ -166,7 +173,7 @@ func (s *Server) deviceWS(w http.ResponseWriter, r *http.Request, d *store.Devic
 			if err != nil {
 				return
 			}
-			if err := s.Hub.HandleDeviceMessage(ctx, d.ID, data); err != nil {
+			if err := s.Hub.HandleDeviceMessage(ctx, d.ID, d.InstallID, data); err != nil {
 				slog.Warn("device message", "pc", d.Name, "err", err)
 			}
 		}
@@ -196,7 +203,7 @@ func (s *Server) deviceWS(w http.ResponseWriter, r *http.Request, d *store.Devic
 			if err != nil {
 				return
 			}
-			_ = s.St.TouchDevice(ctx, d.ID)
+			_ = s.St.TouchDevice(ctx, d)
 		}
 	}
 }

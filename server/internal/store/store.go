@@ -116,6 +116,21 @@ var migrations = []string{
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL
 	);`,
+	// A PC can have several installs, each with its own token: the OSes of a dual-boot PC. Tokens
+	// move here; devices.token_hash is no longer read (SQLite can't drop a UNIQUE column).
+	// AUTOINCREMENT: the hub keys connections by install id, so a revoked id is never reused.
+	`CREATE TABLE installs(
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		token_hash TEXT NOT NULL UNIQUE,
+		label TEXT NOT NULL DEFAULT '',
+		agent TEXT NOT NULL DEFAULT '',
+		created INTEGER NOT NULL,
+		last_seen INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX installs_device ON installs(device_id);
+	INSERT INTO installs(device_id, token_hash, label, created, last_seen)
+		SELECT id, token_hash, name, created, last_seen FROM devices;`,
 }
 
 var defaultPresets = []string{"Coming now", "5 min", "15 min", "Busy, later"}
@@ -340,9 +355,23 @@ func (s *Store) PushSubsFor(ctx context.Context, emails []string) ([]PushSub, er
 
 // ---- devices & pairing ----
 
+// Device is a PC as users see it. It has one install per OS it runs (two for a dual-boot PC).
 type Device struct {
+	ID       int64     `json:"id"`
+	Name     string    `json:"name"`
+	LastSeen int64     `json:"last_seen"`
+	Online   bool      `json:"online"`
+	Installs []Install `json:"installs,omitempty"`
+	// InstallID is the install whose token authenticated a device request.
+	InstallID int64 `json:"-"`
+}
+
+// Install is one paired copy of the client, e.g. the Windows side of a dual-boot PC.
+type Install struct {
 	ID       int64  `json:"id"`
-	Name     string `json:"name"`
+	Label    string `json:"label"`   // the PC name it was paired (or merged) under
+	OS       string `json:"os"`      // "linux" or "windows"; empty for clients older than 1.1.0
+	Version  string `json:"version"` // client version, when reported
 	LastSeen int64  `json:"last_seen"`
 	Online   bool   `json:"online"`
 }
@@ -354,34 +383,59 @@ func (s *Store) CreatePairingCode(ctx context.Context, by string) (string, error
 	return code, err
 }
 
-// PairDevice consumes a pairing code and returns a new device token. Pairing with an existing
-// name re-issues that device's token (e.g. after reinstalling the client).
-func (s *Store) PairDevice(ctx context.Context, code, name string) (int64, string, error) {
+// Pairing is the result of PairDevice.
+type Pairing struct {
+	DeviceID  int64
+	InstallID int64
+	Token     string
+	// The install revoked because the client re-paired from it; zero if none.
+	ReplacedDevice, ReplacedInstall int64
+}
+
+// PairDevice consumes a pairing code and adds a new install with its own token. Pairing under
+// an existing PC name adds the install to that PC (e.g. the second OS of a dual-boot PC).
+// replaces is the client's previous token, if it had one; that install is revoked.
+func (s *Store) PairDevice(ctx context.Context, code, name, replaces string) (*Pairing, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, `DELETE FROM pairing_codes WHERE code = ? AND expires > ?`, strings.ToUpper(strings.TrimSpace(code)), now())
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return 0, "", ErrNotFound
+		return nil, ErrNotFound
 	}
-	tok := RandomToken(32)
-	var id int64
+	p := &Pairing{Token: RandomToken(32)}
 	err = tx.QueryRowContext(ctx, `INSERT INTO devices(name, token_hash, created) VALUES(?, ?, ?)
-		ON CONFLICT(name) DO UPDATE SET token_hash = excluded.token_hash RETURNING id`, name, HashToken(tok), now()).Scan(&id)
+		ON CONFLICT(name) DO UPDATE SET name = excluded.name RETURNING id`, name, unusedTokenHash(), now()).Scan(&p.DeviceID)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
-	return id, tok, tx.Commit()
+	if replaces != "" {
+		err = tx.QueryRowContext(ctx, `DELETE FROM installs WHERE token_hash = ? RETURNING id, device_id`,
+			HashToken(replaces)).Scan(&p.ReplacedInstall, &p.ReplacedDevice)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	err = tx.QueryRowContext(ctx, `INSERT INTO installs(device_id, token_hash, label, created) VALUES(?, ?, ?, ?) RETURNING id`,
+		p.DeviceID, HashToken(p.Token), name, now()).Scan(&p.InstallID)
+	if err != nil {
+		return nil, err
+	}
+	return p, tx.Commit()
 }
+
+// unusedTokenHash fills devices.token_hash (NOT NULL UNIQUE) for new PCs; tokens live in installs.
+func unusedTokenHash() string { return "unused:" + RandomToken(16) }
 
 func (s *Store) DeviceByToken(ctx context.Context, tok string) (*Device, error) {
 	var d Device
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, last_seen FROM devices WHERE token_hash = ?`, HashToken(tok)).Scan(&d.ID, &d.Name, &d.LastSeen)
+	err := s.db.QueryRowContext(ctx, `SELECT d.id, d.name, d.last_seen, i.id FROM installs i JOIN devices d ON d.id = i.device_id
+		WHERE i.token_hash = ?`, HashToken(tok)).Scan(&d.ID, &d.Name, &d.LastSeen, &d.InstallID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -397,6 +451,7 @@ func (s *Store) DeviceByName(ctx context.Context, name string) (*Device, error) 
 	return &d, err
 }
 
+// ListDevices returns every PC with its installs.
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, name, last_seen FROM devices ORDER BY name`)
 	if err != nil {
@@ -404,14 +459,49 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	}
 	defer rows.Close()
 	var out []Device
+	byID := map[int64]*Device{}
 	for rows.Next() {
 		var d Device
 		if err := rows.Scan(&d.ID, &d.Name, &d.LastSeen); err != nil {
 			return nil, err
 		}
+		d.Installs = []Install{}
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		byID[out[i].ID] = &out[i]
+	}
+	irows, err := s.db.QueryContext(ctx, `SELECT id, device_id, label, agent, last_seen FROM installs ORDER BY device_id, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer irows.Close()
+	for irows.Next() {
+		var in Install
+		var dev int64
+		var agent string
+		if err := irows.Scan(&in.ID, &dev, &in.Label, &agent, &in.LastSeen); err != nil {
+			return nil, err
+		}
+		in.Version, in.OS = parseAgent(agent)
+		if d := byID[dev]; d != nil {
+			d.Installs = append(d.Installs, in)
+		}
+	}
+	return out, irows.Err()
+}
+
+// parseAgent reads the client's User-Agent, "attention-getter/1.1.0 (linux)".
+func parseAgent(ua string) (version, os string) {
+	rest, ok := strings.CutPrefix(ua, "attention-getter/")
+	if !ok {
+		return "", ""
+	}
+	version, os, _ = strings.Cut(rest, " ")
+	return version, strings.Trim(os, "()")
 }
 
 // RenameDevice changes a PC's name. The PC itself keeps working: it authenticates by token.
@@ -429,8 +519,22 @@ func (s *Store) RenameDevice(ctx context.Context, id int64, name string) error {
 	return nil
 }
 
-func (s *Store) TouchDevice(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE devices SET last_seen = ? WHERE id = ?`, now(), id)
+// TouchDevice records that a PC is connected through one of its installs.
+func (s *Store) TouchDevice(ctx context.Context, d *Device) error {
+	t := now()
+	if _, err := s.db.ExecContext(ctx, `UPDATE devices SET last_seen = ? WHERE id = ?`, t, d.ID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE installs SET last_seen = ? WHERE id = ?`, t, d.InstallID)
+	return err
+}
+
+// SetInstallAgent stores the User-Agent an install connected with (client version and OS).
+func (s *Store) SetInstallAgent(ctx context.Context, installID int64, agent string) error {
+	if len(agent) > 100 {
+		agent = agent[:100]
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE installs SET agent = ? WHERE id = ?`, agent, installID)
 	return err
 }
 

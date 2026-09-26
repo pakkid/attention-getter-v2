@@ -141,6 +141,9 @@ func (s *Server) listDevices(w http.ResponseWriter, r *http.Request, u *store.Us
 	}
 	for i := range ds {
 		ds[i].Online = s.Hub.Online(ds[i].ID)
+		for j := range ds[i].Installs {
+			ds[i].Installs[j].Online = s.Hub.InstallOnline(ds[i].ID, ds[i].Installs[j].ID)
+		}
 	}
 	if ds == nil {
 		ds = []store.Device{}

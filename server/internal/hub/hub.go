@@ -18,7 +18,7 @@ type Notifier interface {
 	Send(ctx context.Context, emails []string, msg push.Message)
 }
 
-// Conn is one connected PC. The WebSocket writer drains Send until Done closes.
+// Conn is one connected install of a PC. The WebSocket writer drains Send until Done closes.
 type Conn struct {
 	Send chan []byte
 	Done chan struct{}
@@ -31,13 +31,15 @@ type Hub struct {
 	st     *store.Store
 	notify Notifier
 
-	mu      sync.Mutex
-	devices map[int64]*Conn
+	mu sync.Mutex
+	// devices maps PC id -> install id -> connection. A dual-boot PC has one install per OS;
+	// normally only the running one is connected, but alerts go to every connected install.
+	devices map[int64]map[int64]*Conn
 	subs    map[chan []byte]struct{}
 }
 
 func New(st *store.Store, n Notifier) *Hub {
-	return &Hub{st: st, notify: n, devices: map[int64]*Conn{}, subs: map[chan []byte]struct{}{}}
+	return &Hub{st: st, notify: n, devices: map[int64]map[int64]*Conn{}, subs: map[chan []byte]struct{}{}}
 }
 
 // ---- wire format (server <-> PC) ----
@@ -74,17 +76,24 @@ type DeviceMsg struct {
 
 // ---- device connections ----
 
-// Attach registers a PC connection, replacing any previous one, and queues its open alert.
-func (h *Hub) Attach(ctx context.Context, deviceID int64) *Conn {
+// Attach registers an install's connection, replacing that install's previous one, and queues
+// the PC's open alert on it. Other installs of the same PC stay connected.
+func (h *Hub) Attach(ctx context.Context, deviceID, installID int64) *Conn {
 	c := &Conn{Send: make(chan []byte, 16), Done: make(chan struct{})}
 	h.mu.Lock()
-	if old := h.devices[deviceID]; old != nil {
+	conns := h.devices[deviceID]
+	if conns == nil {
+		conns = map[int64]*Conn{}
+		h.devices[deviceID] = conns
+	}
+	if old := conns[installID]; old != nil {
 		old.close()
 	}
-	h.devices[deviceID] = c
+	conns[installID] = c
 	if a, err := h.st.OpenAlert(ctx, deviceID); err == nil {
 		if msg, err := h.alertMsg(ctx, a); err == nil {
-			h.sendLocked(deviceID, msg)
+			b, _ := json.Marshal(msg)
+			h.queueLocked(deviceID, installID, b)
 		}
 	}
 	h.mu.Unlock()
@@ -92,21 +101,44 @@ func (h *Hub) Attach(ctx context.Context, deviceID int64) *Conn {
 	return c
 }
 
-func (h *Hub) Detach(deviceID int64, c *Conn) {
+func (h *Hub) Detach(deviceID, installID int64, c *Conn) {
 	h.mu.Lock()
-	if h.devices[deviceID] == c {
-		delete(h.devices, deviceID)
+	if h.devices[deviceID][installID] == c {
+		h.dropLocked(deviceID, installID)
 	}
 	h.mu.Unlock()
 	c.close()
 	h.broadcast(map[string]any{"type": "devices"})
 }
 
-// Kick disconnects a PC (deleted or re-paired).
+// dropLocked forgets an install's connection and returns it (nil if it wasn't connected).
+func (h *Hub) dropLocked(deviceID, installID int64) *Conn {
+	c := h.devices[deviceID][installID]
+	delete(h.devices[deviceID], installID)
+	if len(h.devices[deviceID]) == 0 {
+		delete(h.devices, deviceID)
+	}
+	return c
+}
+
+// Kick disconnects every install of a PC (deleted or merged into another).
 func (h *Hub) Kick(deviceID int64) {
 	h.mu.Lock()
-	c := h.devices[deviceID]
+	conns := h.devices[deviceID]
 	delete(h.devices, deviceID)
+	h.mu.Unlock()
+	for _, c := range conns {
+		c.close()
+	}
+	if len(conns) > 0 {
+		h.broadcast(map[string]any{"type": "devices"})
+	}
+}
+
+// KickInstall disconnects one install (revoked, re-paired or split off into its own PC).
+func (h *Hub) KickInstall(deviceID, installID int64) {
+	h.mu.Lock()
+	c := h.dropLocked(deviceID, installID)
 	h.mu.Unlock()
 	if c != nil {
 		c.close()
@@ -117,24 +149,46 @@ func (h *Hub) Kick(deviceID int64) {
 // DevicesChanged tells web clients to refetch PCs and groups (renamed, regrouped, ...).
 func (h *Hub) DevicesChanged() { h.broadcast(map[string]any{"type": "devices"}) }
 
+// Online reports whether any install of a PC is connected.
 func (h *Hub) Online(deviceID int64) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.devices[deviceID] != nil
+	return len(h.devices[deviceID]) > 0
 }
 
-// sendLocked queues msg for a device; a PC too slow to drain its queue is disconnected.
+// InstallOnline reports whether one particular install of a PC is connected.
+func (h *Hub) InstallOnline(deviceID, installID int64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.devices[deviceID][installID] != nil
+}
+
+// sendLocked queues msg for every connected install of a PC.
 func (h *Hub) sendLocked(deviceID int64, msg ServerMsg) {
-	c := h.devices[deviceID]
+	h.sendOthersLocked(deviceID, 0, msg)
+}
+
+// sendOthersLocked queues msg for every connected install of a PC except one.
+func (h *Hub) sendOthersLocked(deviceID, exceptInstall int64, msg ServerMsg) {
+	b, _ := json.Marshal(msg)
+	for id := range h.devices[deviceID] {
+		if id != exceptInstall {
+			h.queueLocked(deviceID, id, b)
+		}
+	}
+}
+
+// queueLocked queues b for one install; a client too slow to drain its queue is disconnected.
+func (h *Hub) queueLocked(deviceID, installID int64, b []byte) {
+	c := h.devices[deviceID][installID]
 	if c == nil {
 		return
 	}
-	b, _ := json.Marshal(msg)
 	select {
 	case c.Send <- b:
 	default:
 		c.close()
-		delete(h.devices, deviceID)
+		h.dropLocked(deviceID, installID)
 	}
 }
 
@@ -172,7 +226,7 @@ func (h *Hub) Trigger(ctx context.Context, deviceID int64, typeID *int64, r stor
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.devices[deviceID] == nil {
+	if len(h.devices[deviceID]) == 0 {
 		settings, err := h.st.GetSettings(ctx)
 		if err != nil {
 			return nil, err
@@ -251,7 +305,7 @@ func (h *Hub) ExpireOffline(ctx context.Context) error {
 		return err
 	}
 	for _, a := range pending {
-		if h.devices[a.DeviceID] != nil {
+		if len(h.devices[a.DeviceID]) > 0 {
 			continue
 		}
 		if err := h.st.ResolveAlert(ctx, a.ID, 0, store.StatusMissed, ""); err != nil && !errors.Is(err, store.ErrNotOpen) {
@@ -264,8 +318,8 @@ func (h *Hub) ExpireOffline(ctx context.Context) error {
 	return nil
 }
 
-// HandleDeviceMessage processes an ack, reply or dismiss from a PC.
-func (h *Hub) HandleDeviceMessage(ctx context.Context, deviceID int64, raw []byte) error {
+// HandleDeviceMessage processes an ack, reply or dismiss from one install of a PC.
+func (h *Hub) HandleDeviceMessage(ctx context.Context, deviceID, installID int64, raw []byte) error {
 	var m DeviceMsg
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return err
@@ -292,6 +346,8 @@ func (h *Hub) HandleDeviceMessage(ctx context.Context, deviceID int64, raw []byt
 		if err != nil {
 			return err
 		}
+		// Answered on one install: close the popup on any other that is connected too.
+		h.sendOthersLocked(deviceID, installID, ServerMsg{Op: "cancel", AlertID: m.AlertID})
 		a, err := h.st.GetAlert(ctx, m.AlertID)
 		if err != nil {
 			return err
@@ -319,6 +375,41 @@ func (h *Hub) Cancel(ctx context.Context, alertID int64) error {
 	if a, err = h.st.GetAlert(ctx, alertID); err == nil {
 		h.broadcastAlert(a)
 	}
+	return nil
+}
+
+// Merge folds PC src into dst (see store.MergeDevices). src's open alert is cancelled, and its
+// installs are disconnected so they reconnect as dst.
+func (h *Hub) Merge(ctx context.Context, src, dst int64) error {
+	h.mu.Lock()
+	for {
+		a, err := h.st.OpenAlert(ctx, src)
+		if errors.Is(err, store.ErrNotFound) {
+			break
+		}
+		if err == nil {
+			err = h.st.ResolveAlert(ctx, a.ID, 0, store.StatusCancelled, "")
+		}
+		if err != nil {
+			h.mu.Unlock()
+			return err
+		}
+		h.sendLocked(src, ServerMsg{Op: "cancel", AlertID: a.ID})
+		if a, err := h.st.GetAlert(ctx, a.ID); err == nil {
+			h.broadcastAlert(a)
+		}
+	}
+	if err := h.st.MergeDevices(ctx, src, dst); err != nil {
+		h.mu.Unlock()
+		return err
+	}
+	conns := h.devices[src]
+	delete(h.devices, src)
+	h.mu.Unlock()
+	for _, c := range conns {
+		c.close()
+	}
+	h.broadcast(map[string]any{"type": "devices"})
 	return nil
 }
 
