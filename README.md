@@ -14,16 +14,13 @@ Alexa POST ?key= ──┼── Cloudflare Tunnel ── server (Docker, SQLite
 ## 1. Server
 
 1. **Google OAuth client.** In [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials), create an *OAuth client ID* of type **Web application**. Add your public URL (e.g. `https://attention.example.com`) under **Authorized JavaScript origins**. No redirect URIs are needed.
-2. **Configure.**
-   ```sh
-   cp .env.example .env   # fill in PUBLIC_URL, GOOGLE_CLIENT_ID, ADMIN_EMAILS
-   ```
-3. **Run.**
-   ```sh
-   docker compose up -d --build
-   ```
-   The server listens on `127.0.0.1:8080` only.
-4. **Cloudflare Tunnel.** In the tunnel already running on the host, add a public hostname for `PUBLIC_URL` pointing at `http://localhost:8080`. WebSockets and SSE work through tunnels with no extra settings.
+2. **Deploy with Portainer.** Go to Stacks → Add stack → **Repository**:
+   - Repository URL: `https://github.com/pakkid/attention-getter-v2`, reference `refs/heads/main`, compose path `docker-compose.yml`.
+   - Environment variables: `PUBLIC_URL` (e.g. `https://attention.example.com`), `GOOGLE_CLIENT_ID`, `ADMIN_EMAILS` (comma-separated), and optionally `HOST_PORT` (default `8080`) and `VAPID_SUBJECT`.
+   - Deploy. Portainer clones the repo and builds the image on the server. To update, use **Pull and redeploy** (or enable GitOps updates).
+
+   Without Portainer: `cp .env.example .env`, fill it in, then `docker compose up -d --build`.
+3. **Cloudflare Tunnel.** In the tunnel already running on the host, add a public hostname for `PUBLIC_URL` pointing at `http://localhost:8080` (or your `HOST_PORT`). The server listens on localhost only. WebSockets and SSE work through tunnels with no extra settings.
 
 Data (SQLite database, uploaded media, VAPID keys) lives in the `ag-data` volume.
 
@@ -46,7 +43,9 @@ Under **Settings** each user picks what to be notified about: *replies to my req
 
 ## 2. PC client
 
-Build it (Rust 1.95+):
+Download `attention-getter-linux-x86_64` or `attention-getter-windows-x86_64.exe` from the [latest release](https://github.com/pakkid/attention-getter-v2/releases/latest) and put it somewhere permanent: `~/.local/bin/attention-getter` (then `chmod +x`), or on Windows e.g. `%LOCALAPPDATA%\Programs\attention-getter.exe`.
+
+Or build it (Rust 1.95+):
 
 ```sh
 cd client && cargo build --release
@@ -55,6 +54,15 @@ cd client && cargo build --release
 ```
 
 On Linux the build needs the usual windowing and audio headers (`libxkbcommon`, `wayland`, `alsa-lib`). On Windows nothing extra is needed.
+
+To build the Windows `.exe` from Linux (uses [zig](https://ziglang.org) as the linker; no MinGW needed):
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+client/scripts/build-windows.sh   # → client/target/x86_64-pc-windows-gnu/release/attention-getter.exe
+```
+
+The result is a single self-contained exe for Windows 10/11.
 
 Then:
 
@@ -105,6 +113,10 @@ POST https://attention.example.com/api/trigger?key=ag_XXXX&type=dinner&pc=deskto
 | `message` | no       | Shown in the popup (max 200 chars). |
 
 Response: `{"ok":true,"alerts":[{"alert_id":7,"device":"desktop","merged":false,"online":true}]}`. The key's name (e.g. "Alexa") is shown as the requester, and the key's creator receives reply notifications if their preference is *replies to my requests*.
+
+## Releasing
+
+Push a tag such as `v0.2.0`. The [release workflow](.github/workflows/release.yml) tests the server, builds its Docker image to check the Dockerfile, builds the Linux and Windows clients, and publishes a GitHub release with checksums.
 
 ## Development
 

@@ -1,3 +1,4 @@
 .env
 client/target/
 server/data/
+.claude/

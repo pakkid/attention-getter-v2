@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# dlltool shim for rustc's raw-dylib imports, backed by zig's bundled llvm-dlltool.
+# llvm-dlltool spells GNU dlltool's --temp-prefix as -t.
+args=()
+for a in "$@"; do
+  case "$a" in
+    --temp-prefix) args+=("-t") ;;
+    *) args+=("$a") ;;
+  esac
+done
+exec zig dlltool "${args[@]}"

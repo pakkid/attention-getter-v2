@@ -12,6 +12,7 @@ const GUARD_MS = 3000;
 
 const isPopup = (w) => w?.get_wm_class?.() === WM_CLASS;
 const alive = (w) => w && w.get_compositor_private() !== null;
+const log = (msg) => console.log(`attention-getter: ${msg}`);
 
 export default class AttentionGetterExtension extends Extension {
     enable() {
@@ -36,8 +37,29 @@ export default class AttentionGetterExtension extends Extension {
     }
 
     _onCreated(win) {
-        if (!isPopup(win))
+        if (isPopup(win)) {
+            this._setup(win);
             return;
+        }
+        // On Wayland the window can be created before the client sets its app id.
+        const id = win.connect('notify::wm-class', () => {
+            if (!isPopup(win))
+                return;
+            win.disconnect(id);
+            this._setup(win);
+        });
+        win.connect('unmanaged', () => {
+            try {
+                win.disconnect(id);
+            } catch {}
+        });
+    }
+
+    _setup(win) {
+        if (win._agSetup)
+            return;
+        win._agSetup = true;
+        log(`setup popup "${win.get_title()}", focused=${global.display.focus_window === win}`);
         this._guardUntil = GLib.get_monotonic_time() / 1000 + GUARD_MS;
         win.make_above();
         win.stick(); // follow the user across workspaces
@@ -48,12 +70,15 @@ export default class AttentionGetterExtension extends Extension {
             win.disconnect(id);
             this._place(win);
         });
+        if (global.display.focus_window === win)
+            this._onFocusChanged();
     }
 
     // Moves the popup onto the monitor named in its title ("Attention Getter [DP-3]").
     _place(win) {
         const m = /\[([^\]]+)\]$/.exec(win.get_title() ?? '');
         const idx = m ? global.backend.get_monitor_manager().get_monitor_for_connector(m[1]) : -1;
+        log(`place "${win.get_title()}" -> monitor ${idx}`);
         if (idx < 0)
             return;
         if (win.get_monitor() !== idx)
@@ -72,7 +97,9 @@ export default class AttentionGetterExtension extends Extension {
         }
         if (GLib.get_monotonic_time() / 1000 > this._guardUntil)
             return; // user focused it (hotkey or click)
-        this._guardUntil = 0;
+        // Kept for the whole guard window: GNOME and other extensions (e.g. ones that
+        // activate windows demanding attention) can each try to focus it in turn.
+        log(`popup took focus; returning it to "${this._lastFocus?.get_title?.()}"`);
         if (alive(this._lastFocus)) {
             // focus() doesn't raise, so the popup stays on top of a fullscreen app.
             this._lastFocus.focus(global.get_current_time());
@@ -84,6 +111,7 @@ export default class AttentionGetterExtension extends Extension {
         const win = global.get_window_actors().map((a) => a.meta_window).find(isPopup);
         if (!win)
             return;
+        log('hotkey: focusing popup');
         this._guardUntil = 0;
         Main.activateWindow(win);
     }

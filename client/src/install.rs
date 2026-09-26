@@ -146,10 +146,28 @@ mod linux {
         if sh("gnome-extensions", &["enable", EXT_UUID]).is_ok() {
             println!("Extension enabled.");
         } else {
-            println!("GNOME only discovers new extensions at login on Wayland: log out and back in,");
-            println!("then run: gnome-extensions enable {EXT_UUID}");
+            // GNOME Shell only discovers new extensions at login on Wayland. Adding it to
+            // enabled-extensions now makes it load at the next login without another step.
+            pre_enable_extension()?;
+            println!("Log out and back in to load the GNOME extension (it is already marked enabled).");
         }
         Ok(())
+    }
+
+    fn pre_enable_extension() -> Result<()> {
+        let out = Command::new("gsettings").args(["get", "org.gnome.shell", "enabled-extensions"]).output()?;
+        let current = String::from_utf8_lossy(&out.stdout);
+        if current.contains(&format!("'{EXT_UUID}'")) {
+            return Ok(());
+        }
+        let list = current.trim().trim_start_matches("@as").trim();
+        let inner = list.trim_start_matches('[').trim_end_matches(']').trim();
+        let value = if inner.is_empty() {
+            format!("['{EXT_UUID}']")
+        } else {
+            format!("[{inner}, '{EXT_UUID}']")
+        };
+        sh("gsettings", &["set", "org.gnome.shell", "enabled-extensions", &value])
     }
 
     pub fn uninstall() -> Result<()> {

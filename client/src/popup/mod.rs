@@ -582,6 +582,7 @@ impl ApplicationHandler<UserEvent> for App {
                 );
             }
             WindowEvent::Focused(f) => {
+                crate::log!("popup: focused={f}");
                 self.focused = *f;
                 if *f {
                     self.focus_text = true;

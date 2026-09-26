@@ -1,13 +1,22 @@
+# Works as a Portainer stack (Stacks → Add stack → Repository, compose path docker-compose.yml)
+# and with plain `docker compose up -d --build`. Variables come from Portainer's
+# "Environment variables" section, or from a .env file next to this file.
 services:
   server:
-    build: ./server
+    build:
+      context: ./server
+    image: attention-getter-server:latest
     restart: unless-stopped
-    env_file: .env
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:?set ADMIN_EMAILS}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-}
     volumes:
       - ag-data:/data
-    # Localhost only; point the host's Cloudflare Tunnel at http://localhost:8080.
+    # Localhost only; point the host's Cloudflare Tunnel at http://localhost:${HOST_PORT}.
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${HOST_PORT:-8080}:8080"
 
 volumes:
   ag-data:
