@@ -146,3 +146,7 @@ cd client && cargo test && cargo clippy --all-targets
 ```
 
 Web Push also works on `http://localhost` in desktop Chrome, so the whole flow can be tested locally.
+
+## License
+
+Copyright (c) 2026 Pakkid. Licensed under the [PolyForm Strict License 1.0.0](LICENSE.md): you may use the software for personal and other noncommercial purposes, but you may not modify it, redistribute it, or build other works from it. For any other use, ask for permission.
