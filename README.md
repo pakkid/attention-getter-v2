@@ -43,13 +43,19 @@ Under **Settings** each user picks what to be notified about: *replies to my req
 
 ## 2. PC client
 
-**Windows quick install** (also updates an existing install; run it again any time). In PowerShell:
+**Quick install** (also updates an existing install; run it again any time):
+
+```sh
+# Linux (x86_64)
+curl -fsSL https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/client/scripts/install.sh | sh
+```
 
 ```powershell
+# Windows (PowerShell)
 irm https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/client/scripts/install.ps1 | iex
 ```
 
-It downloads the latest release, verifies its checksum, replaces any running copy, runs `setup` if the PC isn't paired yet, and enables start at login. Set `$env:AG_VERSION = "v0.1.0"` first to pin a version.
+Both download the latest release, verify its checksum, replace any existing install, run `setup` if the PC isn't paired yet, and enable start at login (on GNOME, log out and back in afterwards if the extension is new or changed). To pin a version, set `AG_VERSION=v0.1.1` (Linux: `curl ... | AG_VERSION=v0.1.1 sh`; Windows: `$env:AG_VERSION = "v0.1.1"` first).
 
 Or download `attention-getter-linux-x86_64` or `attention-getter-windows-x86_64.exe` from the [latest release](https://github.com/pakkid/attention-getter-v2/releases/latest) and put it somewhere permanent: `~/.local/bin/attention-getter` (then `chmod +x`), or on Windows e.g. `%LOCALAPPDATA%\Programs\attention-getter.exe`.
 
