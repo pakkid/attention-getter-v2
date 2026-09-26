@@ -43,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/me", s.user(s.getMe))
 	m.HandleFunc("PATCH /api/me", s.user(s.patchMe))
 	m.HandleFunc("GET /api/devices", s.user(s.listDevices))
+	m.HandleFunc("GET /api/groups", s.user(s.listGroups))
 	m.HandleFunc("GET /api/types", s.user(s.listTypes))
 	m.HandleFunc("GET /api/alerts", s.user(s.listAlerts))
 	m.HandleFunc("POST /api/alerts", s.user(s.createAlert))
@@ -62,7 +63,13 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/admin/keys", s.admin(s.adminCreateKey))
 	m.HandleFunc("DELETE /api/admin/keys/{id}", s.admin(s.adminDeleteKey))
 	m.HandleFunc("POST /api/admin/pairing", s.admin(s.adminPairingCode))
+	m.HandleFunc("PATCH /api/admin/devices/{id}", s.admin(s.adminRenameDevice))
 	m.HandleFunc("DELETE /api/admin/devices/{id}", s.admin(s.adminDeleteDevice))
+	m.HandleFunc("POST /api/admin/groups", s.admin(s.adminSaveGroup))
+	m.HandleFunc("PUT /api/admin/groups/{id}", s.admin(s.adminSaveGroup))
+	m.HandleFunc("DELETE /api/admin/groups/{id}", s.admin(s.adminDeleteGroup))
+	m.HandleFunc("GET /api/admin/settings", s.admin(s.adminGetSettings))
+	m.HandleFunc("PUT /api/admin/settings", s.admin(s.adminSaveSettings))
 	m.HandleFunc("GET /api/presets", s.user(s.getPresets))
 	m.HandleFunc("PUT /api/admin/presets", s.admin(s.adminSetPresets))
 
@@ -191,15 +198,26 @@ func pathID(r *http.Request) (int64, bool) {
 	return id, err == nil
 }
 
-// resolveDevices maps a "pc" parameter to target PCs: a name, "all", or empty when only one PC exists.
+// resolveDevices maps a "pc" parameter to target PCs: a PC name, a group name, "all", or empty
+// when only one PC exists.
 func (s *Server) resolveDevices(ctx context.Context, pc string) ([]store.Device, error) {
 	pc = strings.TrimSpace(pc)
 	if pc != "" && !strings.EqualFold(pc, "all") {
 		d, err := s.St.DeviceByName(ctx, pc)
+		if err == nil {
+			return []store.Device{*d}, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		g, ds, err := s.St.GroupByName(ctx, pc)
 		if err != nil {
 			return nil, err
 		}
-		return []store.Device{*d}, nil
+		if len(ds) == 0 {
+			return nil, errors.New("group " + g.Name + " has no PCs")
+		}
+		return ds, nil
 	}
 	all, err := s.St.ListDevices(ctx)
 	if err != nil {
@@ -245,6 +263,7 @@ type triggerResult struct {
 	Device  string `json:"device"`
 	Merged  bool   `json:"merged"`
 	Online  bool   `json:"online"`
+	Missed  bool   `json:"missed"` // PC offline and offline delivery is off: not sent
 }
 
 func (s *Server) raise(ctx context.Context, devices []store.Device, typeID *int64, r store.Requester, message string) ([]triggerResult, error) {
@@ -258,9 +277,29 @@ func (s *Server) raise(ctx context.Context, devices []store.Device, typeID *int6
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, triggerResult{AlertID: a.ID, Device: d.Name, Merged: len(a.Requests) > 1, Online: s.Hub.Online(d.ID)})
+		out = append(out, triggerResult{
+			AlertID: a.ID, Device: d.Name, Merged: len(a.Requests) > 1, Online: s.Hub.Online(d.ID),
+			Missed: a.Status == store.StatusMissed,
+		})
 	}
 	return out, nil
+}
+
+// validName checks a PC or group name: 1-40 chars, not "all", not used by another PC or group.
+// It returns the trimmed name, or an HTTP status and message.
+func (s *Server) validName(ctx context.Context, name string, exceptDevice, exceptGroup int64) (string, int, string) {
+	name = strings.TrimSpace(name)
+	if name == "" || len([]rune(name)) > 40 || strings.EqualFold(name, "all") {
+		return "", http.StatusBadRequest, "name must be 1-40 characters and not \"all\""
+	}
+	taken, err := s.St.NameTaken(ctx, name, exceptDevice, exceptGroup)
+	if err != nil {
+		return "", http.StatusInternalServerError, "internal error"
+	}
+	if taken {
+		return "", http.StatusConflict, "a PC or group is already called " + name
+	}
+	return name, 0, ""
 }
 
 var sessionTTL = 180 * 24 * time.Hour

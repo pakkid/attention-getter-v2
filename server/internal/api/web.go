@@ -95,25 +95,41 @@ func (s *Server) getMe(w http.ResponseWriter, r *http.Request, u *store.User) {
 	writeJSON(w, http.StatusOK, u)
 }
 
+// patchMe updates the signed-in user's own settings; omitted fields are left alone.
 func (s *Server) patchMe(w http.ResponseWriter, r *http.Request, u *store.User) {
 	var body struct {
-		NotifyPref string `json:"notify_pref"`
+		NotifyPref  *string `json:"notify_pref"`
+		DisplayName *string `json:"display_name"` // empty resets to the Google name
 	}
 	if err := readJSON(r, &body); err != nil {
 		httpError(w, http.StatusBadRequest, "bad body")
 		return
 	}
-	switch body.NotifyPref {
-	case "mine", "all", "none":
-	default:
-		httpError(w, http.StatusBadRequest, "notify_pref must be mine, all or none")
-		return
+	if p := body.NotifyPref; p != nil {
+		switch *p {
+		case "mine", "all", "none":
+		default:
+			httpError(w, http.StatusBadRequest, "notify_pref must be mine, all or none")
+			return
+		}
+		if err := s.St.SetNotifyPref(r.Context(), u.Email, *p); err != nil {
+			internalError(w, err)
+			return
+		}
+		u.NotifyPref = *p
 	}
-	if err := s.St.SetNotifyPref(r.Context(), u.Email, body.NotifyPref); err != nil {
-		internalError(w, err)
-		return
+	if n := body.DisplayName; n != nil {
+		name := strings.Join(strings.Fields(*n), " ")
+		if len([]rune(name)) > 40 {
+			httpError(w, http.StatusBadRequest, "name is too long (max 40 characters)")
+			return
+		}
+		if err := s.St.SetDisplayName(r.Context(), u.Email, name); err != nil {
+			internalError(w, err)
+			return
+		}
+		u.DisplayName = name
 	}
-	u.NotifyPref = body.NotifyPref
 	writeJSON(w, http.StatusOK, u)
 }
 
@@ -130,6 +146,15 @@ func (s *Server) listDevices(w http.ResponseWriter, r *http.Request, u *store.Us
 		ds = []store.Device{}
 	}
 	writeJSON(w, http.StatusOK, ds)
+}
+
+func (s *Server) listGroups(w http.ResponseWriter, r *http.Request, u *store.User) {
+	gs, err := s.St.ListGroups(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, gs)
 }
 
 func (s *Server) listTypes(w http.ResponseWriter, r *http.Request, u *store.User) {
@@ -171,7 +196,8 @@ func (s *Server) listAlerts(w http.ResponseWriter, r *http.Request, u *store.Use
 
 func (s *Server) createAlert(w http.ResponseWriter, r *http.Request, u *store.User) {
 	var body struct {
-		Device  string `json:"device"` // PC name or "all"
+		Device  string `json:"device"` // PC name, group name or "all"
+		Group   int64  `json:"group"`  // group id; overrides device
 		Type    string `json:"type"`   // type id or name
 		Message string `json:"message"`
 	}
@@ -188,8 +214,22 @@ func (s *Server) createAlert(w http.ResponseWriter, r *http.Request, u *store.Us
 		httpError(w, http.StatusNotFound, "no PCs are paired yet")
 		return
 	}
-	targets, err := s.resolveDevices(r.Context(), body.Device)
-	if err != nil {
+	var targets []store.Device
+	if body.Group != 0 {
+		targets, err = s.St.GroupDevices(r.Context(), body.Group)
+		if errors.Is(err, store.ErrNotFound) {
+			httpError(w, http.StatusNotFound, "unknown group")
+			return
+		}
+		if err != nil {
+			internalError(w, err)
+			return
+		}
+		if len(targets) == 0 {
+			httpError(w, http.StatusBadRequest, "that group has no PCs")
+			return
+		}
+	} else if targets, err = s.resolveDevices(r.Context(), body.Device); err != nil {
 		httpError(w, http.StatusNotFound, "unknown PC: "+err.Error())
 		return
 	}
@@ -198,16 +238,23 @@ func (s *Server) createAlert(w http.ResponseWriter, r *http.Request, u *store.Us
 		httpError(w, http.StatusNotFound, "unknown attention type")
 		return
 	}
-	name := u.Name
-	if name == "" {
-		name = u.Email
-	}
-	res, err := s.raise(r.Context(), targets, typeID, store.Requester{Email: u.Email, Name: firstName(name)}, body.Message)
+	res, err := s.raise(r.Context(), targets, typeID, store.Requester{Email: u.Email, Name: requesterName(u)}, body.Message)
 	if err != nil {
 		internalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// requesterName is how a user appears on the popup: their chosen name, else their first name.
+func requesterName(u *store.User) string {
+	if u.DisplayName != "" {
+		return u.DisplayName
+	}
+	if u.Name != "" {
+		return firstName(u.Name)
+	}
+	return firstName(u.Email)
 }
 
 func firstName(n string) string {

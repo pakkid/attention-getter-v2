@@ -114,6 +114,9 @@ func (h *Hub) Kick(deviceID int64) {
 	}
 }
 
+// DevicesChanged tells web clients to refetch PCs and groups (renamed, regrouped, ...).
+func (h *Hub) DevicesChanged() { h.broadcast(map[string]any{"type": "devices"}) }
+
 func (h *Hub) Online(deviceID int64) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -163,10 +166,21 @@ func (h *Hub) alertMsg(ctx context.Context, a *store.Alert) (ServerMsg, error) {
 
 // ---- alert lifecycle ----
 
-// Trigger raises an alert on a PC, merging into its open alert if one is showing.
+// Trigger raises an alert on a PC, merging into its open alert if one is showing. If the PC is
+// offline and offline delivery is off, the alert is recorded as missed instead of queued.
 func (h *Hub) Trigger(ctx context.Context, deviceID int64, typeID *int64, r store.Requester, message string) (*store.Alert, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if h.devices[deviceID] == nil {
+		settings, err := h.st.GetSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !settings.DeliverOffline {
+			return h.missedLocked(ctx, deviceID, typeID, r, message)
+		}
+	}
 
 	open, err := h.st.OpenAlert(ctx, deviceID)
 	switch {
@@ -209,6 +223,45 @@ func (h *Hub) Trigger(ctx context.Context, deviceID int64, typeID *int64, r stor
 	h.sendLocked(deviceID, msg)
 	h.broadcastAlert(a)
 	return a, nil
+}
+
+func (h *Hub) missedLocked(ctx context.Context, deviceID int64, typeID *int64, r store.Requester, message string) (*store.Alert, error) {
+	id, err := h.st.CreateMissedAlert(ctx, deviceID, typeID)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.st.AddAlertRequest(ctx, id, r, message); err != nil {
+		return nil, err
+	}
+	a, err := h.st.GetAlert(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	h.broadcastAlert(a)
+	return a, nil
+}
+
+// ExpireOffline marks alerts still waiting for an offline PC as missed. Called when offline
+// delivery is switched off, so queued alerts don't pop up whenever that PC next starts.
+func (h *Hub) ExpireOffline(ctx context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	pending, err := h.st.PendingAlerts(ctx)
+	if err != nil {
+		return err
+	}
+	for _, a := range pending {
+		if h.devices[a.DeviceID] != nil {
+			continue
+		}
+		if err := h.st.ResolveAlert(ctx, a.ID, 0, store.StatusMissed, ""); err != nil && !errors.Is(err, store.ErrNotOpen) {
+			return err
+		}
+		if a, err := h.st.GetAlert(ctx, a.ID); err == nil {
+			h.broadcastAlert(a)
+		}
+	}
+	return nil
 }
 
 // HandleDeviceMessage processes an ack, reply or dismiss from a PC.

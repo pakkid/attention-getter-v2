@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -264,4 +265,118 @@ func (s *Server) adminSetPresets(w http.ResponseWriter, r *http.Request, u *stor
 	}
 	s.Hub.ManifestChanged()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) adminRenameDevice(w http.ResponseWriter, r *http.Request, u *store.User) {
+	id, ok := pathID(r)
+	if !ok {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	name, status, msg := s.validName(r.Context(), body.Name, id, 0)
+	if status != 0 {
+		httpError(w, status, msg)
+		return
+	}
+	switch err := s.St.RenameDevice(r.Context(), id, name); {
+	case errors.Is(err, store.ErrNotFound):
+		httpError(w, http.StatusNotFound, "no such PC")
+		return
+	case errors.Is(err, store.ErrConflict):
+		httpError(w, http.StatusConflict, "a PC is already called "+name)
+		return
+	case err != nil:
+		internalError(w, err)
+		return
+	}
+	s.Hub.DevicesChanged()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminSaveGroup creates (POST) or updates (PUT) a group: {name, device_ids}.
+func (s *Server) adminSaveGroup(w http.ResponseWriter, r *http.Request, u *store.User) {
+	var id int64
+	if r.Method == http.MethodPut {
+		var ok bool
+		if id, ok = pathID(r); !ok {
+			httpError(w, http.StatusBadRequest, "bad id")
+			return
+		}
+	}
+	var body struct {
+		Name      string  `json:"name"`
+		DeviceIDs []int64 `json:"device_ids"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	name, status, msg := s.validName(r.Context(), body.Name, 0, id)
+	if status != 0 {
+		httpError(w, status, msg)
+		return
+	}
+	id, err := s.St.SaveGroup(r.Context(), id, name, body.DeviceIDs)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		httpError(w, http.StatusNotFound, "no such group")
+		return
+	case errors.Is(err, store.ErrConflict):
+		httpError(w, http.StatusConflict, "a group is already called "+name)
+		return
+	case err != nil:
+		internalError(w, err)
+		return
+	}
+	s.Hub.DevicesChanged()
+	writeJSON(w, http.StatusOK, map[string]int64{"id": id})
+}
+
+func (s *Server) adminDeleteGroup(w http.ResponseWriter, r *http.Request, u *store.User) {
+	id, ok := pathID(r)
+	if !ok {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if err := s.St.DeleteGroup(r.Context(), id); err != nil {
+		internalError(w, err)
+		return
+	}
+	s.Hub.DevicesChanged()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) adminGetSettings(w http.ResponseWriter, r *http.Request, u *store.User) {
+	st, err := s.St.GetSettings(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) adminSaveSettings(w http.ResponseWriter, r *http.Request, u *store.User) {
+	var st store.Settings
+	if err := readJSON(r, &st); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	if err := s.St.SaveSettings(r.Context(), st); err != nil {
+		internalError(w, err)
+		return
+	}
+	if !st.DeliverOffline {
+		if err := s.Hub.ExpireOffline(r.Context()); err != nil {
+			internalError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, st)
 }

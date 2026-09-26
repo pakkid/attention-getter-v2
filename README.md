@@ -30,7 +30,9 @@ Open the public URL and sign in with Google. Accounts in `ADMIN_EMAILS` are admi
 
 - **Allowed Google accounts**: add family members. Only listed accounts can sign in.
 - **Attention types**: upload a GIF (≤ 20 MB) plus a sound (mp3/ogg/wav/flac, ≤ 5 MB) and give it a name, e.g. `dinner`. A type named `default` is used when a trigger doesn't specify one.
-- **PCs → + Add PC**: shows a pairing code for the client.
+- **PCs → + Add PC**: shows step-by-step install instructions (Windows or Linux) with a pairing code. **Rename** changes how a PC is shown and addressed; the PC keeps working without re-pairing. *Install or update the PC app* shows the same instructions for updating.
+- **PC groups**: e.g. "Upstairs" with several PCs. Groups appear next to the PCs on the Trigger tab and trigger every PC in them at once. PC and group names share one namespace, so a group also works as `pc=NAME` in trigger URLs.
+- **Offline PCs**: whether an alert for an offline PC waits and pops up when that PC next connects. **Off by default**: such an alert isn't sent, the sender sees "offline, not sent", and History shows it as not delivered. Turning it off also drops alerts already waiting for offline PCs.
 - **Trigger keys**: create a key for Alexa or other automation (see below).
 - **Quick replies**: the presets shown in the popup under keys 1–9.
 
@@ -39,7 +41,7 @@ Open the public URL and sign in with Google. Accounts in `ADMIN_EMAILS` are admi
 - **iPhone/iPad (iOS 16.4+):** open the site in Safari, tap Share, choose **Add to Home Screen**, and open it from the home screen. Then go to **Settings → Enable**. iOS only allows web push for home-screen apps.
 - **Android:** in Chrome, choose Install app (or Add to Home screen), then **Settings → Enable**.
 
-Under **Settings** each user picks what to be notified about: *replies to my requests*, *every reply*, or *nothing*.
+Under **Settings** each user picks what to be notified about (*replies to my requests*, *every reply*, or *nothing*) and can set the name shown on the PC popup (by default their Google first name).
 
 ## 2. PC client
 
@@ -55,7 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/cli
 irm https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/client/scripts/install.ps1 | iex
 ```
 
-Both download the latest release, verify its checksum, replace any existing install, run `setup` if the PC isn't paired yet, and enable start at login (on GNOME, log out and back in afterwards if the extension is new or changed). To pin a version, set `AG_VERSION=v0.1.1` (Linux: `curl ... | AG_VERSION=v0.1.1 sh`; Windows: `$env:AG_VERSION = "v0.1.1"` first).
+Both download the latest release, verify its checksum, replace any existing install, run `setup` if the PC isn't paired yet, and enable start at login (on GNOME, log out and back in afterwards if the extension is new or changed). To pin a version, set `AG_VERSION=v1.0.0` (Linux: `curl ... | AG_VERSION=v1.0.0 sh`; Windows: `$env:AG_VERSION = "v1.0.0"` first).
 
 Or download `attention-getter-linux-x86_64` or `attention-getter-windows-x86_64.exe` from the [latest release](https://github.com/pakkid/attention-getter-v2/releases/latest) and put it somewhere permanent: `~/.local/bin/attention-getter` (then `chmod +x`), or on Windows e.g. `%LOCALAPPDATA%\Programs\attention-getter.exe`.
 
@@ -87,7 +89,7 @@ attention-getter install    # start at login
 ```
 
 - **Linux** installs a systemd user unit (`journalctl --user -u attention-getter -f` for logs).
-- **Windows** adds an entry to `HKCU\…\Run` and starts the client immediately.
+- **Windows** adds an entry to `HKCU\…\Run` and starts the client in the background right away (closing the terminal doesn't stop it; re-running `install` replaces a running copy). To watch its log, end `attention-getter.exe` in Task Manager and run `attention-getter run --console`.
 
 ### GNOME (Wayland)
 
@@ -105,7 +107,7 @@ On X11 and Windows the client grabs the hotkey itself, only while a popup is sho
 
 ### How it behaves
 
-- Alerts arrive instantly over a persistent WebSocket. If the PC is offline, the alert is delivered when it reconnects, and the phone shows "PC offline".
+- Alerts arrive instantly over a persistent WebSocket. If the PC is offline, the alert is not sent unless an admin turned on **Admin → Offline PCs**, in which case it is delivered when the PC reconnects. An alert the PC already received is always re-sent after a brief disconnect, so a reply typed after a network blip still arrives.
 - GIFs and sounds are cached locally and re-synced every 5 minutes (a cheap `304` when nothing changed), plus immediately when an admin uploads or edits a type. If an alert's type isn't cached yet, the popup shows at once and the media appears when the download finishes.
 - A second trigger while a popup is open is merged into it ("Mom, Alexa"). Your one reply goes to everyone who asked.
 - Keys while focused: **Enter** sends, **1–9** on an empty box fills a quick reply, **Esc** dismisses without a reply (the phone is told "Dismissed").
@@ -123,10 +125,10 @@ POST https://attention.example.com/api/trigger?key=ag_XXXX&type=dinner&pc=deskto
 |-----------|----------|---------|
 | `key`     | yes      | The trigger key. It is shown once when created; revoke it any time. |
 | `type`    | no       | Type name or id. Omitted: `default`, else the first type. Ignored if the key is pinned to a type. |
-| `pc`      | no       | PC name, or `all`. Omitted: the only PC (required if several are paired). Ignored if the key is pinned to a PC. |
+| `pc`      | no       | PC name, group name, or `all`. Omitted: the only PC (required if several are paired). Ignored if the key is pinned to a PC. |
 | `message` | no       | Shown in the popup (max 200 chars). |
 
-Response: `{"ok":true,"alerts":[{"alert_id":7,"device":"desktop","merged":false,"online":true}]}`. The key's name (e.g. "Alexa") is shown as the requester, and the key's creator receives reply notifications if their preference is *replies to my requests*.
+Response: `{"ok":true,"alerts":[{"alert_id":7,"device":"desktop","merged":false,"online":true,"missed":false}]}`. `missed` means the PC was offline and the alert wasn't sent; if that's true for every target, the response is `409` with `"ok":false`. The key's name (e.g. "Alexa") is shown as the requester, and the key's creator receives reply notifications if their preference is *replies to my requests*.
 
 ## Releasing
 

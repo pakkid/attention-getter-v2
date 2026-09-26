@@ -99,6 +99,25 @@ CREATE TABLE IF NOT EXISTS presets(
 );
 `
 
+// migrations upgrade a database created from schema; PRAGMA user_version counts how many ran.
+var migrations = []string{
+	`ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+	CREATE TABLE groups(
+		id INTEGER PRIMARY KEY,
+		name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+		created INTEGER NOT NULL
+	);
+	CREATE TABLE group_devices(
+		group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+		device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+		PRIMARY KEY(group_id, device_id)
+	);
+	CREATE TABLE settings(
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);`,
+}
+
 var defaultPresets = []string{"Coming now", "5 min", "15 min", "Busy, later"}
 
 // Open opens (creating if needed) the database at path. Use ":memory:" for tests.
@@ -114,6 +133,9 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		return nil, err
+	}
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM presets`).Scan(&n); err != nil {
 		return nil, err
@@ -126,7 +148,39 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+func (s *Store) migrate() error {
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	for ; v < len(migrations); v++ {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(migrations[v]); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d: %w", v+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v+1)); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) Close() error { return s.db.Close() }
+
+// ErrConflict is returned when a name is already taken.
+var ErrConflict = errors.New("name already in use")
+
+func isUnique(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
 
 func now() int64 { return time.Now().Unix() }
 
@@ -150,20 +204,21 @@ func RandomToken(n int) string {
 // ---- users & sessions ----
 
 type User struct {
-	Email      string `json:"email"`
-	Name       string `json:"name"`
-	Picture    string `json:"picture"`
-	Role       string `json:"role"`
-	NotifyPref string `json:"notify_pref"`
+	Email       string `json:"email"`
+	Name        string `json:"name"`         // from Google, refreshed at every sign-in
+	DisplayName string `json:"display_name"` // chosen by the user; overrides Name when set
+	Picture     string `json:"picture"`
+	Role        string `json:"role"`
+	NotifyPref  string `json:"notify_pref"`
 }
 
 func (u *User) IsAdmin() bool { return u.Role == "admin" }
 
-const userCols = `email, name, picture, role, notify_pref`
+const userCols = `u.email, u.name, u.display_name, u.picture, u.role, u.notify_pref`
 
 func scanUser(sc interface{ Scan(...any) error }) (*User, error) {
 	var u User
-	if err := sc.Scan(&u.Email, &u.Name, &u.Picture, &u.Role, &u.NotifyPref); err != nil {
+	if err := sc.Scan(&u.Email, &u.Name, &u.DisplayName, &u.Picture, &u.Role, &u.NotifyPref); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -173,11 +228,11 @@ func scanUser(sc interface{ Scan(...any) error }) (*User, error) {
 }
 
 func (s *Store) GetUser(ctx context.Context, email string) (*User, error) {
-	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE email = ?`, strings.ToLower(email)))
+	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users u WHERE u.email = ?`, strings.ToLower(email)))
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users ORDER BY role, email`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users u ORDER BY u.role, u.email`)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +260,12 @@ func (s *Store) UpdateProfile(ctx context.Context, email, name, picture string) 
 	return err
 }
 
+// SetDisplayName sets the name shown on popups; empty falls back to the Google name.
+func (s *Store) SetDisplayName(ctx context.Context, email, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET display_name = ? WHERE email = ?`, name, email)
+	return err
+}
+
 func (s *Store) SetNotifyPref(ctx context.Context, email, pref string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET notify_pref = ? WHERE email = ?`, pref, email)
 	return err
@@ -223,7 +284,7 @@ func (s *Store) CreateSession(ctx context.Context, email string, ttl time.Durati
 }
 
 func (s *Store) SessionUser(ctx context.Context, tok string) (*User, error) {
-	return scanUser(s.db.QueryRowContext(ctx, `SELECT u.email, u.name, u.picture, u.role, u.notify_pref
+	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+`
 		FROM sessions s JOIN users u ON u.email = s.email WHERE s.token_hash = ? AND s.expires > ?`, HashToken(tok), now()))
 }
 
@@ -351,6 +412,21 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// RenameDevice changes a PC's name. The PC itself keeps working: it authenticates by token.
+func (s *Store) RenameDevice(ctx context.Context, id int64, name string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE devices SET name = ? WHERE id = ?`, name, id)
+	if isUnique(err) {
+		return ErrConflict
+	}
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) TouchDevice(ctx context.Context, id int64) error {

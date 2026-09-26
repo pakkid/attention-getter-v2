@@ -13,6 +13,7 @@ const (
 	StatusReplied   = "replied"
 	StatusDismissed = "dismissed"
 	StatusCancelled = "cancelled"
+	StatusMissed    = "missed" // PC was offline and offline delivery is off
 )
 
 // Requester identifies who triggered an alert: a signed-in user or an API key.
@@ -131,6 +132,24 @@ func (s *Store) CreateAlert(ctx context.Context, deviceID int64, typeID *int64) 
 	err := s.db.QueryRowContext(ctx, `INSERT INTO alerts(device_id, type_id, status, created) VALUES(?, ?, ?, ?) RETURNING id`,
 		deviceID, typeID, StatusPending, now()).Scan(&id)
 	return id, err
+}
+
+// CreateMissedAlert records an alert that was never delivered because the PC was offline.
+func (s *Store) CreateMissedAlert(ctx context.Context, deviceID int64, typeID *int64) (int64, error) {
+	var id int64
+	t := now()
+	err := s.db.QueryRowContext(ctx, `INSERT INTO alerts(device_id, type_id, status, created, resolved) VALUES(?, ?, ?, ?, ?) RETURNING id`,
+		deviceID, typeID, StatusMissed, t, t).Scan(&id)
+	return id, err
+}
+
+// PendingAlerts returns alerts not yet received by their PC.
+func (s *Store) PendingAlerts(ctx context.Context) ([]*Alert, error) {
+	rows, err := s.db.QueryContext(ctx, alertSelect+` WHERE a.status = 'pending' ORDER BY a.id`)
+	if err != nil {
+		return nil, err
+	}
+	return s.scanAlerts(ctx, rows)
 }
 
 func (s *Store) AddAlertRequest(ctx context.Context, alertID int64, r Requester, message string) error {

@@ -4,6 +4,7 @@ const state = {
   config: null,
   me: null,
   devices: [],
+  groups: [],
   types: [],
   alerts: [],
   presets: [],
@@ -60,12 +61,19 @@ function ago(ts) {
 }
 
 function duration(a) {
-  if (!a.resolved) return '';
+  if (!a.resolved || (a.status !== 'replied' && a.status !== 'dismissed')) return '';
   const s = a.resolved - a.created;
   return s < 60 ? `${s}s` : `${Math.round(s / 60)} min`;
 }
 
 const mediaURL = (t, kind) => `/media/${t.id}/${kind}?h=${t.hash}`;
+const shownName = (u) => u.display_name || u.name || u.email;
+const firstName = (n) => (n.includes('@') ? n.split('@')[0] : n.split(/\s+/)[0]);
+
+function copyBtn(text) {
+  return el('button', { class: 'link', onclick: () => navigator.clipboard.writeText(text).then(() => toast('Copied'), () => toast('Copy failed')) }, 'Copy');
+}
+
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
@@ -82,10 +90,10 @@ async function boot() {
 }
 
 async function loadAll() {
-  const [devices, types, alerts, presets] = await Promise.all([
-    api('GET', '/api/devices'), api('GET', '/api/types'), api('GET', '/api/alerts?limit=50'), api('GET', '/api/presets'),
+  const [devices, groups, types, alerts, presets] = await Promise.all([
+    api('GET', '/api/devices'), api('GET', '/api/groups'), api('GET', '/api/types'), api('GET', '/api/alerts?limit=50'), api('GET', '/api/presets'),
   ]);
-  Object.assign(state, { devices, types, alerts, presets });
+  Object.assign(state, { devices, groups, types, alerts, presets });
   connectEvents();
 }
 
@@ -99,7 +107,7 @@ function connectEvents() {
       const i = state.alerts.findIndex((a) => a.id === ev.alert.id);
       if (i >= 0) state.alerts[i] = ev.alert; else state.alerts.unshift(ev.alert);
     } else if (ev.type === 'devices') {
-      state.devices = await api('GET', '/api/devices');
+      [state.devices, state.groups] = await Promise.all([api('GET', '/api/devices'), api('GET', '/api/groups')]);
     }
     softRender();
   };
@@ -180,7 +188,10 @@ function triggerView() {
       state.me.role === 'admin' ? el('p', { class: 'muted small' }, 'Go to Admin → PCs → Add PC.') : el('p', { class: 'muted small' }, 'Ask an admin to pair a PC.')));
     return v;
   }
-  if (!state.devices.some((d) => d.name === state.sel.device) && state.sel.device !== 'all') state.sel.device = state.devices[0].name;
+  const groupSel = (g) => `g:${g.id}`;
+  const validSel = state.sel.device === 'all' || state.devices.some((d) => d.name === state.sel.device)
+    || state.groups.some((g) => groupSel(g) === state.sel.device && g.device_ids.length);
+  if (!validSel) state.sel.device = state.devices[0].name;
   if (state.types.length && !state.types.some((t) => String(t.id) === state.sel.type)) state.sel.type = String(state.types[0].id);
 
   const pick = (key, val) => { state.sel[key] = val; localStorage.setItem('ag.' + key, val); render(); };
@@ -190,6 +201,12 @@ function triggerView() {
   for (const d of state.devices) {
     chips.append(el('button', { class: 'chip', 'aria-pressed': String(state.sel.device === d.name), onclick: () => pick('device', d.name) },
       el('span', { class: 'dot' + (d.online ? ' on' : ''), title: d.online ? 'online' : 'offline' }), d.name));
+  }
+  for (const g of state.groups.filter((g) => g.device_ids.length)) {
+    const online = state.devices.filter((d) => g.device_ids.includes(d.id) && d.online).length;
+    chips.append(el('button', { class: 'chip', 'aria-pressed': String(state.sel.device === groupSel(g)), onclick: () => pick('device', groupSel(g)),
+      title: state.devices.filter((d) => g.device_ids.includes(d.id)).map((d) => d.name).join(', ') },
+    el('span', { class: 'dot' + (online ? ' on' : '') }), g.name, el('span', { class: 'muted small' }, `${online}/${g.device_ids.length}`)));
   }
   if (state.devices.length > 1) {
     chips.append(el('button', { class: 'chip', 'aria-pressed': String(state.sel.device === 'all'), onclick: () => pick('device', 'all') }, 'All PCs'));
@@ -212,11 +229,16 @@ function triggerView() {
   const go = guard(async () => {
     send.disabled = true;
     try {
-      const res = await api('POST', '/api/alerts', { device: state.sel.device, type: state.sel.type, message: msg.value });
+      const target = state.sel.device.startsWith('g:') ? { group: Number(state.sel.device.slice(2)) } : { device: state.sel.device };
+      const res = await api('POST', '/api/alerts', { ...target, type: state.sel.type, message: msg.value });
       state.lastAlertIds = res.map((r) => r.alert_id);
       msg.value = '';
-      const off = res.filter((r) => !r.online).map((r) => r.device);
-      toast(off.length ? `${off.join(', ')} offline, will show when it reconnects` : res.some((r) => r.merged) ? 'Added to the open alert' : 'Sent!');
+      const missed = res.filter((r) => r.missed).map((r) => r.device);
+      const queued = res.filter((r) => !r.online && !r.missed).map((r) => r.device);
+      toast(missed.length === res.length ? `${missed.join(', ')} ${missed.length > 1 ? 'are' : 'is'} offline, not sent`
+        : missed.length ? `Sent, but ${missed.join(', ')} offline`
+          : queued.length ? `${queued.join(', ')} offline, will show when it reconnects`
+            : res.some((r) => r.merged) ? 'Added to the open alert' : 'Sent!');
       state.alerts = await api('GET', '/api/alerts?limit=50');
       render();
     } finally { send.disabled = false; }
@@ -240,6 +262,7 @@ const statusText = {
   replied: 'Replied',
   dismissed: 'Dismissed without a reply',
   cancelled: 'Cancelled',
+  missed: 'PC was offline, not delivered',
 };
 
 function alertCard(a, withCancel) {
@@ -276,10 +299,20 @@ function historyView() {
 
 function settingsView() {
   const v = el('div');
-  v.append(el('h2', {}, 'Account'), el('div', { class: 'card row' },
-    state.me.picture ? el('img', { src: state.me.picture, alt: '', referrerpolicy: 'no-referrer', style: 'width:40px;height:40px;border-radius:50%' }) : null,
-    el('div', { class: 'grow' }, el('div', {}, state.me.name || state.me.email), el('div', { class: 'muted small' }, state.me.email)),
-    el('button', { onclick: guard(async () => { await api('POST', '/auth/logout'); state.me = null; es?.close(); render(); }) }, 'Sign out')));
+  const nameInput = el('input', { type: 'text', maxlength: '40', value: state.me.display_name, placeholder: firstName(state.me.name || state.me.email) });
+  const saveName = guard(async () => {
+    state.me = await api('PATCH', '/api/me', { display_name: nameInput.value });
+    toast(state.me.display_name ? `You'll show up as ${state.me.display_name}` : 'Using your Google name');
+    render();
+  });
+  nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveName(); });
+  v.append(el('h2', {}, 'Account'), el('div', { class: 'card stack' },
+    el('div', { class: 'row' },
+      state.me.picture ? el('img', { src: state.me.picture, alt: '', referrerpolicy: 'no-referrer', style: 'width:40px;height:40px;border-radius:50%' }) : null,
+      el('div', { class: 'grow' }, el('div', {}, shownName(state.me)), el('div', { class: 'muted small' }, state.me.email)),
+      el('button', { onclick: guard(async () => { await api('POST', '/auth/logout'); state.me = null; es?.close(); render(); }) }, 'Sign out')),
+    el('div', {}, el('label', { class: 'field' }, 'Your name on the PC popup (leave empty to use your Google first name)'),
+      el('div', { class: 'row' }, el('div', { class: 'grow' }, nameInput), el('button', { onclick: saveName }, 'Save')))));
 
   v.append(el('h2', {}, 'Notifications'));
   const card = el('div', { class: 'card stack' });
@@ -343,22 +376,24 @@ async function disablePush(sub) {
 function adminView() {
   const v = el('div');
   if (!state.admin) {
-    Promise.all([api('GET', '/api/admin/users'), api('GET', '/api/admin/keys')]).then(([users, keys]) => {
-      state.admin = { users, keys };
+    Promise.all([api('GET', '/api/admin/users'), api('GET', '/api/admin/keys'), api('GET', '/api/admin/settings')]).then(([users, keys, settings]) => {
+      state.admin = { users, keys, settings };
       render();
     }).catch((e) => toast(e.message));
     v.append(el('p', { class: 'muted' }, 'Loading…'));
     return v;
   }
   const reload = async () => {
-    const [users, keys, devices, types, presets] = await Promise.all([
-      api('GET', '/api/admin/users'), api('GET', '/api/admin/keys'), api('GET', '/api/devices'), api('GET', '/api/types'), api('GET', '/api/presets'),
+    const [users, keys, settings, devices, groups, types, presets] = await Promise.all([
+      api('GET', '/api/admin/users'), api('GET', '/api/admin/keys'), api('GET', '/api/admin/settings'),
+      api('GET', '/api/devices'), api('GET', '/api/groups'), api('GET', '/api/types'), api('GET', '/api/presets'),
     ]);
-    Object.assign(state, { devices, types, presets });
-    state.admin = { ...state.admin, users, keys };
+    Object.assign(state, { devices, groups, types, presets });
+    state.admin = { ...state.admin, users, keys, settings };
     render();
   };
-  v.append(pcsSection(reload), typesSection(reload), keysSection(reload), usersSection(reload), presetsSection(reload));
+  v.append(pcsSection(reload), groupsSection(reload), deliverySection(reload), typesSection(reload), keysSection(reload),
+    usersSection(reload), presetsSection(reload));
   return v;
 }
 
@@ -366,24 +401,134 @@ function pcsSection(reload) {
   const s = el('div', {}, el('h2', {}, 'PCs'));
   const list = el('div', { class: 'card list' });
   for (const d of state.devices) {
-    list.append(el('div', { class: 'item' }, el('span', { class: 'dot' + (d.online ? ' on' : '') }),
+    const item = el('div', { class: 'item' });
+    const show = () => item.replaceChildren(el('span', { class: 'dot' + (d.online ? ' on' : '') }),
       el('div', { class: 'grow' }, el('div', {}, d.name), el('div', { class: 'muted small' }, d.online ? 'online' : `last seen ${ago(d.last_seen)}`)),
+      el('button', { class: 'link', onclick: edit }, 'Rename'),
       el('button', { class: 'link danger', onclick: guard(async () => {
         if (!confirm(`Remove ${d.name}? It will need to be paired again.`)) return;
         await api('DELETE', `/api/admin/devices/${d.id}`); await reload();
-      }) }, 'Remove')));
+      }) }, 'Remove'));
+    function edit() {
+      const name = el('input', { type: 'text', value: d.name, maxlength: '40' });
+      const save = guard(async () => {
+        if (name.value.trim() === d.name) return show();
+        await api('PATCH', `/api/admin/devices/${d.id}`, { name: name.value });
+        toast('Renamed'); await reload();
+      });
+      name.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') show(); });
+      item.replaceChildren(el('div', { class: 'grow' }, name), el('button', { class: 'primary', onclick: save }, 'Save'), el('button', { onclick: show }, 'Cancel'));
+      name.focus();
+      name.select();
+    }
+    show();
+    list.append(item);
   }
   const pair = el('div', { class: 'item' });
   pair.append(el('button', { onclick: guard(async () => {
     const { code } = await api('POST', '/api/admin/pairing');
-    pair.replaceChildren(el('div', { class: 'stack grow' },
-      el('div', { class: 'code' }, code),
-      el('div', { class: 'muted small' }, 'On the PC run ', el('span', { class: 'mono' }, 'attention-getter setup'), ` and enter this server URL and code. Expires in 15 minutes.`),
-      el('div', { class: 'mono secret' }, location.origin)));
+    pair.replaceChildren(installGuide(code));
   }) }, '+ Add PC'));
   list.append(pair);
+  s.append(list, el('details', { class: 'card' }, el('summary', {}, 'Install or update the PC app'), installGuide(null)));
+  return s;
+}
+
+const INSTALL = {
+  windows: {
+    label: 'Windows',
+    shell: 'Open PowerShell (Start → type “PowerShell”) and run:',
+    cmd: 'irm https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/client/scripts/install.ps1 | iex',
+    note: 'Setup opens in its own window. If SmartScreen warns about the app, choose More info → Run anyway.',
+  },
+  linux: {
+    label: 'Linux',
+    shell: 'Open a terminal and run:',
+    cmd: 'curl -fsSL https://raw.githubusercontent.com/pakkid/attention-getter-v2/main/client/scripts/install.sh | sh',
+    note: 'On GNOME, log out and back in once afterwards so the popup can stay out of your way and the hotkey works.',
+  },
+};
+let installOS = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent) ? 'linux' : 'windows';
+
+// Step-by-step install instructions; with a pairing code for a new PC, or without one for updates.
+function installGuide(code) {
+  const box = el('div', { class: 'stack grow' });
+  const draw = () => {
+    const os = INSTALL[installOS];
+    const step = (n, ...kids) => el('div', { class: 'step' }, el('span', { class: 'num' }, n), el('div', { class: 'grow stack' }, ...kids));
+    const copyable = (text, cls = 'mono') => el('div', { class: 'secret row' }, el('div', { class: `grow ${cls}` }, text), copyBtn(text));
+    box.replaceChildren(
+      el('div', { class: 'chips' }, Object.entries(INSTALL).map(([k, o]) => el('button', {
+        class: 'chip', 'aria-pressed': String(installOS === k), onclick: () => { installOS = k; draw(); },
+      }, o.label))),
+      step(1, el('div', {}, os.shell), copyable(os.cmd)),
+      code
+        ? step(2, el('div', {}, 'When setup asks, enter:'),
+          el('div', { class: 'muted small' }, 'Server URL'), copyable(location.origin),
+          el('div', { class: 'muted small' }, 'Pairing code (expires in 15 minutes)'), copyable(code, 'code'),
+          el('div', { class: 'muted small' }, 'Then give the PC a name, pick the monitor for the popup and the hotkey (F13 by default).'))
+        : step(2, el('div', {}, 'A new PC needs a pairing code: close this and tap ', el('strong', {}, '+ Add PC'), '.'),
+          el('div', { class: 'muted small' }, 'To update a PC that is already set up, just run the command again; it keeps its pairing and settings.')),
+      step(3, el('div', {}, code ? 'The PC shows up in this list as soon as it connects.' : 'The PC reconnects by itself after updating.'),
+        el('div', { class: 'muted small' }, os.note)),
+    );
+  };
+  draw();
+  return box;
+}
+
+function groupsSection(reload) {
+  const s = el('div', {}, el('h2', {}, 'PC groups'));
+  const list = el('div', { class: 'card list' });
+  const names = (ids) => state.devices.filter((d) => ids.includes(d.id)).map((d) => d.name).join(', ') || 'No PCs';
+  for (const g of state.groups) {
+    list.append(el('div', { class: 'item' },
+      el('div', { class: 'grow' }, el('div', {}, g.name), el('div', { class: 'muted small' }, names(g.device_ids))),
+      el('button', { class: 'link', onclick: () => list.replaceWith(groupForm(g, reload)) }, 'Edit'),
+      el('button', { class: 'link danger', onclick: guard(async () => {
+        if (!confirm(`Delete group ${g.name}? The PCs stay paired.`)) return;
+        await api('DELETE', `/api/admin/groups/${g.id}`); await reload();
+      }) }, 'Delete')));
+  }
+  list.append(el('div', { class: 'item' },
+    el('button', { disabled: !state.devices.length, onclick: () => list.replaceWith(groupForm(null, reload)) }, '+ Add group'),
+    state.groups.length ? null : el('div', { class: 'muted small grow' }, 'Trigger several PCs at once, e.g. “Upstairs”. Groups also work as pc=NAME in trigger URLs.')));
   s.append(list);
   return s;
+}
+
+function groupForm(g, reload) {
+  const name = el('input', { type: 'text', value: g?.name || '', maxlength: '40', placeholder: 'e.g. Upstairs' });
+  const boxes = state.devices.map((d) => ({ d, box: el('input', { type: 'checkbox', checked: !!g?.device_ids.includes(d.id) }) }));
+  const save = el('button', { class: 'primary' }, g ? 'Save' : 'Create');
+  save.addEventListener('click', guard(async () => {
+    const device_ids = boxes.filter((b) => b.box.checked).map((b) => b.d.id);
+    await api(g ? 'PUT' : 'POST', g ? `/api/admin/groups/${g.id}` : '/api/admin/groups', { name: name.value, device_ids });
+    toast('Saved'); await reload();
+  }));
+  return el('div', { class: 'card stack' },
+    el('div', {}, el('label', { class: 'field' }, 'Name'), name),
+    el('div', {}, el('label', { class: 'field' }, 'PCs in this group'),
+      boxes.map(({ d, box }) => el('label', { class: 'check' }, box, d.name))),
+    el('div', { class: 'row' }, save, el('button', { onclick: () => render() }, 'Cancel')));
+}
+
+function deliverySection(reload) {
+  const on = state.admin.settings.deliver_offline;
+  const box = el('input', { type: 'checkbox', checked: on });
+  box.addEventListener('change', guard(async () => {
+    box.disabled = true;
+    try {
+      state.admin.settings = await api('PUT', '/api/admin/settings', { deliver_offline: box.checked });
+      toast(box.checked ? 'Offline PCs will get alerts when they reconnect' : 'Alerts for offline PCs will not be sent');
+      await reload();
+    } finally { box.disabled = false; }
+  }));
+  return el('div', {}, el('h2', {}, 'Offline PCs'), el('div', { class: 'card stack' },
+    el('label', { class: 'check' }, box, 'Send alerts when an offline PC comes back online'),
+    el('div', { class: 'muted small' }, on
+      ? 'On: an alert for an offline PC waits and pops up when that PC next connects, even hours later.'
+      : 'Off: an alert for an offline PC is not sent. The sender sees “offline, not sent” and it shows in History as not delivered.')));
 }
 
 function typesSection(reload) {
@@ -469,7 +614,7 @@ function usersSection(reload) {
   for (const u of state.admin.users) {
     const self = u.email === state.me.email;
     list.append(el('div', { class: 'item' },
-      el('div', { class: 'grow' }, el('div', {}, u.name || u.email), el('div', { class: 'muted small' }, u.email)),
+      el('div', { class: 'grow' }, el('div', {}, shownName(u)), el('div', { class: 'muted small' }, u.display_name && u.name ? `${u.email} · Google: ${u.name}` : u.email)),
       el('span', { class: 'badge' + (u.role === 'admin' ? ' warn' : '') }, u.role),
       self ? null : el('button', { class: 'link', onclick: guard(async () => {
         await api('POST', '/api/admin/users', { email: u.email, role: u.role === 'admin' ? 'user' : 'admin' }); await reload();

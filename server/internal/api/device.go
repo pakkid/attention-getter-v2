@@ -56,6 +56,17 @@ func (s *Server) trigger(w http.ResponseWriter, r *http.Request) {
 		internalError(w, err)
 		return
 	}
+	var missed []string
+	for _, a := range res {
+		if a.Missed {
+			missed = append(missed, a.Device)
+		}
+	}
+	if len(missed) == len(res) {
+		// Nothing was sent: every target PC is offline and offline delivery is off.
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": strings.Join(missed, ", ") + " offline", "alerts": res})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "alerts": res})
 }
 
@@ -71,6 +82,13 @@ func (s *Server) devicePair(w http.ResponseWriter, r *http.Request) {
 	body.Name = strings.TrimSpace(body.Name)
 	if body.Name == "" || len(body.Name) > 40 || strings.EqualFold(body.Name, "all") {
 		httpError(w, http.StatusBadRequest, "invalid PC name")
+		return
+	}
+	// Re-pairing under an existing name (any case) takes over that PC; a group name can't be used.
+	if d, err := s.St.DeviceByName(r.Context(), body.Name); err == nil {
+		body.Name = d.Name
+	} else if _, _, err := s.St.GroupByName(r.Context(), body.Name); err == nil {
+		httpError(w, http.StatusConflict, "a group is already called "+body.Name+"; pick another PC name")
 		return
 	}
 	id, tok, err := s.St.PairDevice(r.Context(), body.Code, body.Name)
