@@ -3,6 +3,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -164,9 +166,27 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func staticHandler(root fs.FS) http.Handler {
 	files := http.FileServerFS(root)
+	// Content-hash ETags: embedded files have no modtime, so this is what lets browsers revalidate cheaply.
+	etags := map[string]string{}
+	_ = fs.WalkDir(root, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := fs.ReadFile(root, p)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(b)
+		etags["/"+p] = `"` + hex.EncodeToString(sum[:8]) + `"`
+		return nil
+	})
+	etags["/"] = etags["/index.html"]
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" || r.URL.Path == "/sw.js" || r.URL.Path == "/index.html" {
-			w.Header().Set("Cache-Control", "no-cache")
+		// Always revalidate (unchanged files get a 304). Without an explicit header Cloudflare adds a
+		// 4-hour browser TTL, and a deploy doesn't show up until that runs out.
+		w.Header().Set("Cache-Control", "no-cache")
+		if tag, ok := etags[r.URL.Path]; ok {
+			w.Header().Set("ETag", tag)
 		}
 		files.ServeHTTP(w, r)
 	})
