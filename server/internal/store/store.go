@@ -133,6 +133,8 @@ var migrations = []string{
 		SELECT id, token_hash, name, created, last_seen FROM devices;`,
 	// Opt-in for 'mine' users: also notify about replies to API-key (Alexa/webhook) triggers.
 	`ALTER TABLE users ADD COLUMN notify_automation INTEGER NOT NULL DEFAULT 0;`,
+	// A phone is a device without installs: its alerts go to one user's Web Push subscriptions.
+	`ALTER TABLE devices ADD COLUMN phone_of TEXT REFERENCES users(email) ON DELETE CASCADE;`,
 }
 
 var defaultPresets = []string{"Coming now", "5 min", "15 min", "Busy, later"}
@@ -337,6 +339,13 @@ func (s *Store) DeletePushSub(ctx context.Context, endpoint string) error {
 	return err
 }
 
+// HasPushSub reports whether a user has turned notifications on anywhere.
+func (s *Store) HasPushSub(ctx context.Context, email string) (bool, error) {
+	var ok bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM push_subscriptions WHERE email = ?)`, email).Scan(&ok)
+	return ok, err
+}
+
 func (s *Store) PushSubsFor(ctx context.Context, emails []string) ([]PushSub, error) {
 	if len(emails) == 0 {
 		return nil, nil
@@ -365,9 +374,11 @@ func (s *Store) PushSubsFor(ctx context.Context, emails []string) ([]PushSub, er
 // ---- devices & pairing ----
 
 // Device is a PC as users see it. It has one install per OS it runs (two for a dual-boot PC).
+// A phone is a device too: it has no installs, and PhoneOf is the user whose phone it is.
 type Device struct {
 	ID       int64     `json:"id"`
 	Name     string    `json:"name"`
+	PhoneOf  string    `json:"phone_of,omitempty"`
 	LastSeen int64     `json:"last_seen"`
 	Online   bool      `json:"online"`
 	Installs []Install `json:"installs,omitempty"`
@@ -419,7 +430,10 @@ func (s *Store) PairDevice(ctx context.Context, code, name, replaces string) (*P
 	}
 	p := &Pairing{Token: RandomToken(32)}
 	err = tx.QueryRowContext(ctx, `INSERT INTO devices(name, token_hash, created) VALUES(?, ?, ?)
-		ON CONFLICT(name) DO UPDATE SET name = excluded.name RETURNING id`, name, unusedTokenHash(), now()).Scan(&p.DeviceID)
+		ON CONFLICT(name) DO UPDATE SET name = excluded.name WHERE phone_of IS NULL RETURNING id`, name, unusedTokenHash(), now()).Scan(&p.DeviceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrConflict // a phone has that name
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +458,7 @@ func unusedTokenHash() string { return "unused:" + RandomToken(16) }
 func (s *Store) DeviceByToken(ctx context.Context, tok string) (*Device, error) {
 	var d Device
 	err := s.db.QueryRowContext(ctx, `SELECT d.id, d.name, d.last_seen, i.id FROM installs i JOIN devices d ON d.id = i.device_id
-		WHERE i.token_hash = ?`, HashToken(tok)).Scan(&d.ID, &d.Name, &d.LastSeen, &d.InstallID)
+		WHERE i.token_hash = ? AND d.phone_of IS NULL`, HashToken(tok)).Scan(&d.ID, &d.Name, &d.LastSeen, &d.InstallID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -453,16 +467,17 @@ func (s *Store) DeviceByToken(ctx context.Context, tok string) (*Device, error) 
 
 func (s *Store) DeviceByName(ctx context.Context, name string) (*Device, error) {
 	var d Device
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, last_seen FROM devices WHERE name = ? COLLATE NOCASE`, name).Scan(&d.ID, &d.Name, &d.LastSeen)
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, COALESCE(phone_of, ''), last_seen FROM devices WHERE name = ? COLLATE NOCASE`, name).
+		Scan(&d.ID, &d.Name, &d.PhoneOf, &d.LastSeen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	return &d, err
 }
 
-// ListDevices returns every PC with its installs.
+// ListDevices returns every PC with its installs, then every phone.
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, last_seen FROM devices ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, COALESCE(phone_of, ''), last_seen FROM devices ORDER BY phone_of IS NOT NULL, name`)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +486,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	byID := map[int64]*Device{}
 	for rows.Next() {
 		var d Device
-		if err := rows.Scan(&d.ID, &d.Name, &d.LastSeen); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.PhoneOf, &d.LastSeen); err != nil {
 			return nil, err
 		}
 		d.Installs = []Install{}
@@ -511,6 +526,27 @@ func parseAgent(ua string) (version, os string) {
 	}
 	version, os, _ = strings.Cut(rest, " ")
 	return version, strings.Trim(os, "()")
+}
+
+// CreatePhone adds a phone belonging to a user.
+func (s *Store) CreatePhone(ctx context.Context, name, email string) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `INSERT INTO devices(name, token_hash, created, phone_of) VALUES(?, ?, ?, ?) RETURNING id`,
+		name, unusedTokenHash(), now(), email).Scan(&id)
+	if isUnique(err) {
+		return 0, ErrConflict
+	}
+	return id, err
+}
+
+// PhoneOf returns whose phone a device is, or "" for a PC.
+func (s *Store) PhoneOf(ctx context.Context, deviceID int64) (string, error) {
+	var email string
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(phone_of, '') FROM devices WHERE id = ?`, deviceID).Scan(&email)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return email, err
 }
 
 // RenameDevice changes a PC's name. The PC itself keeps working: it authenticates by token.

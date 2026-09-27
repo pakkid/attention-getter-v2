@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +17,8 @@ import (
 )
 
 type Notifier interface {
-	Send(ctx context.Context, emails []string, msg push.Message)
+	// Send returns how many of the users' subscriptions accepted msg.
+	Send(ctx context.Context, emails []string, msg push.Message) int
 }
 
 // Conn is one connected install of a PC. The WebSocket writer drains Send until Done closes.
@@ -220,13 +223,26 @@ func (h *Hub) alertMsg(ctx context.Context, a *store.Alert) (ServerMsg, error) {
 
 // ---- alert lifecycle ----
 
-// Trigger raises an alert on a PC, merging into its open alert if one is showing. If the PC is
-// offline and offline delivery is off, the alert is recorded as missed instead of queued.
+// Trigger raises an alert on a PC or phone, merging into its open alert if there is one. If
+// the PC is offline and offline delivery is off, or the phone's owner has no notifications
+// on, the alert is recorded as missed instead of queued.
 func (h *Hub) Trigger(ctx context.Context, deviceID int64, typeID *int64, r store.Requester, message string) (*store.Alert, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if len(h.devices[deviceID]) == 0 {
+	phone, err := h.st.PhoneOf(ctx, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if phone != "" {
+		on, err := h.st.HasPushSub(ctx, phone)
+		if err != nil {
+			return nil, err
+		}
+		if !on {
+			return h.missedLocked(ctx, deviceID, typeID, r, message)
+		}
+	} else if len(h.devices[deviceID]) == 0 {
 		settings, err := h.st.GetSettings(ctx)
 		if err != nil {
 			return nil, err
@@ -247,11 +263,9 @@ func (h *Hub) Trigger(ctx context.Context, deviceID int64, typeID *int64, r stor
 		if err != nil {
 			return nil, err
 		}
-		msg, err := h.alertMsg(ctx, open)
-		if err != nil {
+		if err := h.deliverLocked(ctx, open); err != nil {
 			return nil, err
 		}
-		h.sendLocked(deviceID, msg)
 		h.broadcastAlert(open)
 		return open, nil
 	case errors.Is(err, store.ErrNotFound):
@@ -270,13 +284,107 @@ func (h *Hub) Trigger(ctx context.Context, deviceID int64, typeID *int64, r stor
 	if err != nil {
 		return nil, err
 	}
-	msg, err := h.alertMsg(ctx, a)
-	if err != nil {
+	if err := h.deliverLocked(ctx, a); err != nil {
 		return nil, err
 	}
-	h.sendLocked(deviceID, msg)
 	h.broadcastAlert(a)
 	return a, nil
+}
+
+// deliverLocked sends an open alert to the PC's connected installs, or to the phone.
+func (h *Hub) deliverLocked(ctx context.Context, a *store.Alert) error {
+	if a.Phone != "" {
+		go h.ringPhone(a)
+		return nil
+	}
+	msg, err := h.alertMsg(ctx, a)
+	if err != nil {
+		return err
+	}
+	h.sendLocked(a.DeviceID, msg)
+	return nil
+}
+
+// ringPhone pushes an alert to its phone's owner. It counts as delivered once a push service
+// accepts it; if none does, a first attempt is recorded as missed.
+func (h *Hub) ringPhone(a *store.Alert) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	n := h.notify.Send(ctx, []string{a.Phone}, PhoneMessage(a))
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var err error
+	switch {
+	case n > 0:
+		err = h.st.MarkDelivered(ctx, a.ID, a.DeviceID)
+	case a.Status == store.StatusPending:
+		if err = h.st.ResolveAlert(ctx, a.ID, a.DeviceID, store.StatusMissed, ""); errors.Is(err, store.ErrNotOpen) {
+			err = nil
+		}
+	default:
+		return // a re-ring of an alert that already reached the phone
+	}
+	if err != nil {
+		slog.Error("phone alert", "err", err)
+		return
+	}
+	if a, err := h.st.GetAlert(ctx, a.ID); err == nil {
+		h.broadcastAlert(a)
+	}
+}
+
+// PhoneMessage is the push notification that rings a phone: who wants its owner, and why.
+func PhoneMessage(a *store.Alert) push.Message {
+	var names, msgs []string
+	for _, r := range a.Requests {
+		if !slices.Contains(names, r.Name) {
+			names = append(names, r.Name)
+		}
+		if r.Message != "" {
+			msgs = append(msgs, r.Name+": "+r.Message)
+		}
+	}
+	title := "Someone wants you"
+	switch len(names) {
+	case 0:
+	case 1:
+		title = names[0] + " wants you"
+	default:
+		title = strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1] + " want you"
+	}
+	body := strings.Join(msgs, "\n")
+	if body == "" {
+		body = "Tap to reply"
+		if a.TypeName != "" {
+			body = a.TypeName + ". Tap to reply"
+		}
+	}
+	return push.Message{Title: title, Body: body, Tag: fmt.Sprintf("alert-%d", a.ID), URL: fmt.Sprintf("/#reply/%d", a.ID)}
+}
+
+// ErrNotYours is returned when someone other than a phone's owner answers its alert.
+var ErrNotYours = errors.New("that alert isn't for your phone")
+
+// PhoneReply answers an alert on a phone, from the web app of the phone's owner.
+func (h *Hub) PhoneReply(ctx context.Context, alertID int64, email, status, text string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	a, err := h.st.GetAlert(ctx, alertID)
+	if err != nil {
+		return err
+	}
+	if a.Phone == "" || a.Phone != email {
+		return ErrNotYours
+	}
+	if err := h.st.ResolveAlert(ctx, alertID, a.DeviceID, status, truncate(text, 500)); err != nil {
+		return err
+	}
+	if a, err = h.st.GetAlert(ctx, alertID); err != nil {
+		return err
+	}
+	h.broadcastAlert(a)
+	go h.notifyOutcome(a)
+	return nil
 }
 
 func (h *Hub) missedLocked(ctx context.Context, deviceID int64, typeID *int64, r store.Requester, message string) (*store.Alert, error) {
@@ -305,7 +413,7 @@ func (h *Hub) ExpireOffline(ctx context.Context) error {
 		return err
 	}
 	for _, a := range pending {
-		if len(h.devices[a.DeviceID]) > 0 {
+		if len(h.devices[a.DeviceID]) > 0 || a.Phone != "" {
 			continue
 		}
 		if err := h.st.ResolveAlert(ctx, a.ID, 0, store.StatusMissed, ""); err != nil && !errors.Is(err, store.ErrNotOpen) {
@@ -372,6 +480,16 @@ func (h *Hub) Cancel(ctx context.Context, alertID int64) error {
 		return err
 	}
 	h.sendLocked(a.DeviceID, ServerMsg{Op: "cancel", AlertID: alertID})
+	if a.Phone != "" {
+		// Quietly swap the phone's notification for one saying it's no longer needed.
+		owner := []string{a.Phone}
+		msg := push.Message{Title: "Never mind", Body: "Cancelled", Tag: fmt.Sprintf("alert-%d", a.ID), URL: "/#history", Silent: true}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			h.notify.Send(ctx, owner, msg)
+		}()
+	}
 	if a, err = h.st.GetAlert(ctx, alertID); err == nil {
 		h.broadcastAlert(a)
 	}
@@ -421,6 +539,8 @@ func (h *Hub) notifyOutcome(a *store.Alert) {
 		slog.Error("notify recipients", "err", err)
 		return
 	}
+	// Whoever answered on their phone doesn't need telling.
+	emails = slices.DeleteFunc(emails, func(e string) bool { return e == a.Phone })
 	h.notify.Send(ctx, emails, OutcomeMessage(a))
 }
 

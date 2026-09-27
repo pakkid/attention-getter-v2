@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/alerts", s.user(s.listAlerts))
 	m.HandleFunc("POST /api/alerts", s.user(s.createAlert))
 	m.HandleFunc("POST /api/alerts/{id}/cancel", s.user(s.cancelAlert))
+	m.HandleFunc("POST /api/alerts/{id}/reply", s.user(s.replyAlert))
 	m.HandleFunc("GET /api/events", s.user(s.events))
 	m.HandleFunc("POST /api/push/subscribe", s.user(s.pushSubscribe))
 	m.HandleFunc("POST /api/push/unsubscribe", s.user(s.pushUnsubscribe))
@@ -66,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/admin/keys", s.admin(s.adminCreateKey))
 	m.HandleFunc("DELETE /api/admin/keys/{id}", s.admin(s.adminDeleteKey))
 	m.HandleFunc("POST /api/admin/pairing", s.admin(s.adminPairingCode))
+	m.HandleFunc("POST /api/admin/phones", s.admin(s.adminCreatePhone))
 	m.HandleFunc("PATCH /api/admin/devices/{id}", s.admin(s.adminRenameDevice))
 	m.HandleFunc("DELETE /api/admin/devices/{id}", s.admin(s.adminDeleteDevice))
 	m.HandleFunc("POST /api/admin/devices/{id}/merge", s.admin(s.adminMergeDevice))
@@ -248,8 +251,8 @@ func pathID(r *http.Request) (int64, bool) {
 	return id, err == nil
 }
 
-// resolveDevices maps a "pc" parameter to target PCs: a PC name, a group name, "all", or empty
-// when only one PC exists.
+// resolveDevices maps a "pc" parameter to targets: a PC or phone name, a group name, "all" (every
+// PC), or empty when only one PC exists.
 func (s *Server) resolveDevices(ctx context.Context, pc string) ([]store.Device, error) {
 	pc = strings.TrimSpace(pc)
 	if pc != "" && !strings.EqualFold(pc, "all") {
@@ -269,10 +272,11 @@ func (s *Server) resolveDevices(ctx context.Context, pc string) ([]store.Device,
 		}
 		return ds, nil
 	}
-	all, err := s.St.ListDevices(ctx)
+	devices, err := s.St.ListDevices(ctx)
 	if err != nil {
 		return nil, err
 	}
+	all := slices.DeleteFunc(devices, func(d store.Device) bool { return d.PhoneOf != "" })
 	if pc == "" && len(all) > 1 {
 		return nil, errors.New("several PCs are paired; pass pc=<name> or pc=all")
 	}
@@ -314,6 +318,7 @@ type triggerResult struct {
 	Merged  bool   `json:"merged"`
 	Online  bool   `json:"online"`
 	Missed  bool   `json:"missed"` // PC offline and offline delivery is off: not sent
+	Phone   bool   `json:"phone,omitempty"`
 }
 
 func (s *Server) raise(ctx context.Context, devices []store.Device, typeID *int64, r store.Requester, message string) ([]triggerResult, error) {
@@ -327,10 +332,14 @@ func (s *Server) raise(ctx context.Context, devices []store.Device, typeID *int6
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, triggerResult{
+		res := triggerResult{
 			AlertID: a.ID, Device: d.Name, Merged: len(a.Requests) > 1, Online: s.Hub.Online(d.ID),
-			Missed: a.Status == store.StatusMissed,
-		})
+			Missed: a.Status == store.StatusMissed, Phone: d.PhoneOf != "",
+		}
+		if res.Phone {
+			res.Online = !res.Missed // a phone has no connection; it's reachable if its owner has notifications on
+		}
+		out = append(out, res)
 	}
 	return out, nil
 }
@@ -347,7 +356,7 @@ func (s *Server) validName(ctx context.Context, name string, exceptDevice, excep
 		return "", http.StatusInternalServerError, "internal error"
 	}
 	if taken {
-		return "", http.StatusConflict, "a PC or group is already called " + name
+		return "", http.StatusConflict, "a PC, phone or group is already called " + name
 	}
 	return name, 0, ""
 }

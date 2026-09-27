@@ -46,6 +46,8 @@ type Message struct {
 	Body  string `json:"body"`
 	Tag   string `json:"tag,omitempty"`
 	URL   string `json:"url,omitempty"`
+	// Silent replaces a notification with the same tag without sounding or buzzing again.
+	Silent bool `json:"silent,omitempty"`
 }
 
 type Service struct {
@@ -63,12 +65,14 @@ func New(keys Keys, subject string, st *store.Store) *Service {
 func (s *Service) PublicKey() string { return s.keys.Public }
 
 // Send delivers msg to every subscription of the given users, pruning expired subscriptions.
-func (s *Service) Send(ctx context.Context, emails []string, msg Message) {
+// It returns how many subscriptions the push services accepted it for.
+func (s *Service) Send(ctx context.Context, emails []string, msg Message) int {
 	subs, err := s.store.PushSubsFor(ctx, emails)
 	if err != nil {
 		slog.Error("push: load subscriptions", "err", err)
-		return
+		return 0
 	}
+	accepted := 0
 	payload, _ := json.Marshal(msg)
 	for _, sub := range subs {
 		resp, err := webpush.SendNotificationWithContext(ctx, payload, &webpush.Subscription{
@@ -93,6 +97,9 @@ func (s *Service) Send(ctx context.Context, emails []string, msg Message) {
 			_ = s.store.DeletePushSub(ctx, sub.Endpoint)
 		case resp.StatusCode >= 400:
 			slog.Warn("push: rejected", "status", resp.StatusCode)
+		default:
+			accepted++
 		}
 	}
+	return accepted
 }

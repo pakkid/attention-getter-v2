@@ -53,6 +53,7 @@ func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request, u *stor
 		internalError(w, err)
 		return
 	}
+	s.Hub.DevicesChanged() // their phone went with them
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -230,6 +231,44 @@ func (s *Server) adminPairingCode(w http.ResponseWriter, r *http.Request, u *sto
 	writeJSON(w, http.StatusOK, map[string]string{"code": code})
 }
 
+// adminCreatePhone adds a user's phone as a device: alerts for it arrive as notifications in
+// that user's web app.
+func (s *Server) adminCreatePhone(w http.ResponseWriter, r *http.Request, u *store.User) {
+	var body struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	owner, err := s.St.GetUser(r.Context(), body.Email)
+	if errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusBadRequest, "pick whose phone it is")
+		return
+	}
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	name, status, msg := s.validName(r.Context(), body.Name, 0, 0)
+	if status != 0 {
+		httpError(w, status, msg)
+		return
+	}
+	id, err := s.St.CreatePhone(r.Context(), name, owner.Email)
+	if errors.Is(err, store.ErrConflict) {
+		httpError(w, http.StatusConflict, "a PC or phone is already called "+name)
+		return
+	}
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	s.Hub.DevicesChanged()
+	writeJSON(w, http.StatusOK, map[string]int64{"id": id})
+}
+
 func (s *Server) adminDeleteDevice(w http.ResponseWriter, r *http.Request, u *store.User) {
 	id, ok := pathID(r)
 	if !ok {
@@ -324,6 +363,10 @@ func (s *Server) adminMergeDevice(w http.ResponseWriter, r *http.Request, u *sto
 	found := 0
 	for _, d := range ds {
 		if d.ID == id || d.ID == body.Into {
+			if d.PhoneOf != "" {
+				httpError(w, http.StatusBadRequest, "phones can't be merged")
+				return
+			}
 			found++
 		}
 	}

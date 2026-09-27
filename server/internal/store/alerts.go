@@ -9,11 +9,11 @@ import (
 
 const (
 	StatusPending   = "pending"   // created, not yet received by the PC
-	StatusDelivered = "delivered" // popup is showing
+	StatusDelivered = "delivered" // popup is showing, or the phone's notification was sent
 	StatusReplied   = "replied"
 	StatusDismissed = "dismissed"
 	StatusCancelled = "cancelled"
-	StatusMissed    = "missed" // PC was offline and offline delivery is off
+	StatusMissed    = "missed" // PC was offline and offline delivery is off, or the phone had notifications off
 )
 
 // Requester identifies who triggered an alert: a signed-in user or an API key.
@@ -34,6 +34,7 @@ type Alert struct {
 	ID         int64          `json:"id"`
 	DeviceID   int64          `json:"device_id"`
 	DeviceName string         `json:"device_name"`
+	Phone      string         `json:"phone,omitempty"` // for a phone: whose it is
 	TypeID     *int64         `json:"type_id"`
 	TypeName   string         `json:"type_name"`
 	Status     string         `json:"status"`
@@ -45,7 +46,7 @@ type Alert struct {
 
 func (a *Alert) Open() bool { return a.Status == StatusPending || a.Status == StatusDelivered }
 
-const alertSelect = `SELECT a.id, a.device_id, d.name, a.type_id, COALESCE(t.name, ''), a.status, a.reply, a.created, a.resolved
+const alertSelect = `SELECT a.id, a.device_id, d.name, COALESCE(d.phone_of, ''), a.type_id, COALESCE(t.name, ''), a.status, a.reply, a.created, a.resolved
 	FROM alerts a JOIN devices d ON d.id = a.device_id LEFT JOIN types t ON t.id = a.type_id`
 
 func (s *Store) scanAlerts(ctx context.Context, rows *sql.Rows) ([]*Alert, error) {
@@ -54,7 +55,7 @@ func (s *Store) scanAlerts(ctx context.Context, rows *sql.Rows) ([]*Alert, error
 	byID := map[int64]*Alert{}
 	for rows.Next() {
 		var a Alert
-		if err := rows.Scan(&a.ID, &a.DeviceID, &a.DeviceName, &a.TypeID, &a.TypeName, &a.Status, &a.Reply, &a.Created, &a.Resolved); err != nil {
+		if err := rows.Scan(&a.ID, &a.DeviceID, &a.DeviceName, &a.Phone, &a.TypeID, &a.TypeName, &a.Status, &a.Reply, &a.Created, &a.Resolved); err != nil {
 			return nil, err
 		}
 		a.Requests = []AlertRequest{}

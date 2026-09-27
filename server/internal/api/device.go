@@ -88,6 +88,10 @@ func (s *Server) devicePair(w http.ResponseWriter, r *http.Request) {
 	// Pairing under an existing name (any case) adds an install to that PC, e.g. the other OS of a
 	// dual-boot PC. A group name can't be used.
 	if d, err := s.St.DeviceByName(r.Context(), body.Name); err == nil {
+		if d.PhoneOf != "" {
+			httpError(w, http.StatusConflict, "a phone is already called "+d.Name+"; pick another PC name")
+			return
+		}
 		body.Name = d.Name
 	} else if _, _, err := s.St.GroupByName(r.Context(), body.Name); err == nil {
 		httpError(w, http.StatusConflict, "a group is already called "+body.Name+"; pick another PC name")
@@ -96,6 +100,10 @@ func (s *Server) devicePair(w http.ResponseWriter, r *http.Request) {
 	p, err := s.St.PairDevice(r.Context(), body.Code, body.Name, body.Replaces)
 	if errors.Is(err, store.ErrNotFound) {
 		httpError(w, http.StatusForbidden, "pairing code invalid or expired")
+		return
+	}
+	if errors.Is(err, store.ErrConflict) {
+		httpError(w, http.StatusConflict, "a phone is already called "+body.Name+"; pick another PC name")
 		return
 	}
 	if err != nil {

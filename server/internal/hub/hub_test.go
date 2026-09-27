@@ -21,9 +21,10 @@ type sent struct {
 	msg    push.Message
 }
 
-func (f *fakeNotifier) Send(_ context.Context, emails []string, msg push.Message) {
+func (f *fakeNotifier) Send(_ context.Context, emails []string, msg push.Message) int {
 	slices.Sort(emails)
 	f.sent <- sent{emails, msg}
+	return len(emails)
 }
 
 func setup(t *testing.T) (*Hub, *store.Store, *fakeNotifier, int64, int64) {
@@ -329,5 +330,102 @@ func TestNotifyAutomationOptIn(t *testing.T) {
 	// A trigger from a person doesn't reach mom: she only opted into automation replies.
 	if got := reply(store.Requester{Email: "dad@x.com", Name: "Dad"}); !slices.Equal(got, []string{"dad@x.com", "sis@x.com"}) {
 		t.Fatalf("user trigger recipients = %v", got)
+	}
+}
+
+func nextPush(t *testing.T, n *fakeNotifier) sent {
+	t.Helper()
+	select {
+	case s := <-n.sent:
+		return s
+	case <-time.After(time.Second):
+		t.Fatal("no notification")
+	}
+	return sent{}
+}
+
+func waitStatus(t *testing.T, st *store.Store, id int64, want string) {
+	t.Helper()
+	for range 100 {
+		if a, _ := st.GetAlert(context.Background(), id); a != nil && a.Status == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("alert %d never became %s", id, want)
+}
+
+func TestPhone(t *testing.T) {
+	h, st, n, _, _ := setup(t)
+	ctx := context.Background()
+	if err := st.UpsertUser(ctx, "kid@x.com", "user"); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.SetNotifyPref(ctx, "kid@x.com", "all")
+	phone, err := st.CreatePhone(ctx, "Kid's phone", "kid@x.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No notifications turned on: not sent, whatever the offline setting says.
+	_ = st.SaveSettings(ctx, store.Settings{DeliverOffline: true})
+	a, err := h.Trigger(ctx, phone, nil, store.Requester{Email: "mom@x.com", Name: "Mom"}, "dinner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Status != store.StatusMissed || a.Phone != "kid@x.com" {
+		t.Fatalf("expected a missed phone alert, got %+v", a)
+	}
+
+	if err := st.AddPushSub(ctx, "kid@x.com", store.PushSub{Endpoint: "https://push.example/1", P256dh: "k", Auth: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	a, err = h.Trigger(ctx, phone, nil, store.Requester{Email: "mom@x.com", Name: "Mom"}, "dinner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := nextPush(t, n)
+	if !slices.Equal(s.emails, []string{"kid@x.com"}) || s.msg.Title != "Mom wants you" || s.msg.Body != "Mom: dinner" ||
+		s.msg.URL != fmt.Sprintf("/#reply/%d", a.ID) {
+		t.Fatalf("ring = %+v", s)
+	}
+	waitStatus(t, st, a.ID, store.StatusDelivered)
+
+	b, _ := h.Trigger(ctx, phone, nil, store.Requester{Email: "dad@x.com", Name: "Dad"}, "")
+	if b.ID != a.ID {
+		t.Fatalf("expected merge into %d, got %d", a.ID, b.ID)
+	}
+	if s := nextPush(t, n); s.msg.Title != "Mom and Dad want you" {
+		t.Fatalf("re-ring = %+v", s.msg)
+	}
+
+	if err := h.PhoneReply(ctx, a.ID, "mom@x.com", store.StatusReplied, "hi"); err != ErrNotYours {
+		t.Fatalf("someone else's reply: err = %v", err)
+	}
+	if err := h.PhoneReply(ctx, a.ID, "kid@x.com", store.StatusReplied, "coming"); err != nil {
+		t.Fatal(err)
+	}
+	// The requesters and sis ('all') hear about it; kid is 'all' too but answered it.
+	if s := nextPush(t, n); !slices.Equal(s.emails, []string{"dad@x.com", "mom@x.com", "sis@x.com"}) || s.msg.Body != "coming" {
+		t.Fatalf("outcome = %+v", s)
+	}
+	if err := h.PhoneReply(ctx, a.ID, "kid@x.com", store.StatusReplied, "again"); err != store.ErrNotOpen {
+		t.Fatalf("second reply: err = %v", err)
+	}
+
+	// Cancelling quietly replaces the notification.
+	c, _ := h.Trigger(ctx, phone, nil, store.Requester{Email: "mom@x.com", Name: "Mom"}, "")
+	nextPush(t, n)
+	if err := h.Cancel(ctx, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if s := nextPush(t, n); !s.msg.Silent || s.msg.Tag != fmt.Sprintf("alert-%d", c.ID) {
+		t.Fatalf("cancel = %+v", s.msg)
+	}
+
+	// A PC can't be paired under the phone's name.
+	code, _ := st.CreatePairingCode(ctx, "mom@x.com")
+	if _, err := st.PairDevice(ctx, code, "Kid's phone", ""); err != store.ErrConflict {
+		t.Fatalf("pairing as the phone: err = %v", err)
 	}
 }

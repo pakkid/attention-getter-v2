@@ -8,7 +8,9 @@ self.addEventListener('push', (e) => {
   e.waitUntil(self.registration.showNotification(msg.title, {
     body: msg.body,
     tag: msg.tag,
-    renotify: true,
+    // Silent: swap an earlier notification (e.g. a cancelled alert) without buzzing again.
+    renotify: !msg.silent,
+    silent: !!msg.silent,
     icon: '/icons/icon-192.png',
     badge: '/icons/badge-96.png',
     data: { url: msg.url || '/#history' },

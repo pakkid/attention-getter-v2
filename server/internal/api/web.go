@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"attention-getter/server/internal/hub"
 	"attention-getter/server/internal/store"
 )
 
@@ -291,6 +292,43 @@ func (s *Server) cancelAlert(w http.ResponseWriter, r *http.Request, u *store.Us
 		httpError(w, http.StatusNotFound, "no such alert")
 	case errors.Is(err, store.ErrNotOpen):
 		httpError(w, http.StatusConflict, "alert already resolved")
+	case err != nil:
+		internalError(w, err)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// replyAlert answers an alert on the signed-in user's phone: a reply, or a dismissal.
+func (s *Server) replyAlert(w http.ResponseWriter, r *http.Request, u *store.User) {
+	id, ok := pathID(r)
+	if !ok {
+		httpError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var body struct {
+		Text    string `json:"text"`
+		Dismiss bool   `json:"dismiss"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		httpError(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	status, text := store.StatusReplied, strings.TrimSpace(body.Text)
+	if body.Dismiss {
+		status, text = store.StatusDismissed, ""
+	} else if text == "" {
+		httpError(w, http.StatusBadRequest, "type a reply")
+		return
+	}
+	err := s.Hub.PhoneReply(r.Context(), id, u.Email, status, text)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		httpError(w, http.StatusNotFound, "no such alert")
+	case errors.Is(err, hub.ErrNotYours):
+		httpError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, store.ErrNotOpen):
+		httpError(w, http.StatusConflict, "already answered or cancelled")
 	case err != nil:
 		internalError(w, err)
 	default:

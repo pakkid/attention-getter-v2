@@ -73,6 +73,7 @@ const firstName = (n) => (n.includes('@') ? n.split('@')[0] : n.split(/\s+/)[0])
 // Broadsheet line icons: 24px grid, 1.5 stroke, round caps, drawn in currentColor.
 const ICONS = {
   check: ['M5 12.5l4.5 4.5L19 7.5'],
+  phone: ['M8.5 3h7A1.5 1.5 0 0 1 17 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 19.5v-15A1.5 1.5 0 0 1 8.5 3z', 'M11 18h2'],
 };
 function icon(name, size = 18) {
   const ns = 'http://www.w3.org/2000/svg';
@@ -84,6 +85,10 @@ function icon(name, size = 18) {
 }
 
 const tag = (tone, text) => el('span', { class: `tag tag-${tone}` }, tone === 'live' ? el('span', { class: 'tag-dot', 'aria-hidden': 'true' }) : null, text);
+// A phone has no connection to show, so it gets a phone icon where a PC has its online dot.
+const isPhone = (d) => !!d?.phone_of;
+const pcs = () => state.devices.filter((d) => !isPhone(d));
+const phoneIcon = () => [icon('phone', 16), el('span', { class: 'sr-only' }, 'phone, ')];
 const dot = (on) => [el('span', { class: 'dot' + (on ? ' on' : ''), 'aria-hidden': 'true' }), el('span', { class: 'sr-only' }, on ? 'online, ' : 'offline, ')];
 
 function copyBtn(text) {
@@ -237,7 +242,8 @@ function render() {
   }
   placeIndicator();
   shownTab = t;
-  const view = { trigger: triggerView, history: historyView, settings: settingsView, admin: adminView }[t] || triggerView;
+  const view = t.startsWith('reply/') ? replyView
+    : { trigger: triggerView, history: historyView, settings: settingsView, admin: adminView }[t] || triggerView;
   app.replaceChildren(view());
   fx.picked = '';
 }
@@ -306,18 +312,21 @@ function triggerView() {
   for (const d of state.devices) {
     const via = (d.installs || []).length > 1 ? d.installs.find((i) => i.online) : null;
     chips.append(el('button', { class: 'chip' + popIf('device', d.name), 'aria-pressed': String(state.sel.device === d.name), onclick: () => pick('device', d.name),
-      title: via ? `Running ${installName(via)}` : null }, dot(d.online), d.name));
+      title: via ? `Running ${installName(via)}` : null }, isPhone(d) ? phoneIcon() : dot(d.online), d.name));
   }
   for (const g of state.groups.filter((g) => g.device_ids.length)) {
-    const online = state.devices.filter((d) => g.device_ids.includes(d.id) && d.online).length;
+    // Online counts cover the group's PCs; its phones have no online state.
+    const members = pcs().filter((d) => g.device_ids.includes(d.id));
+    const online = members.filter((d) => d.online).length;
     chips.append(el('button', { class: 'chip' + popIf('device', groupSel(g)), 'aria-pressed': String(state.sel.device === groupSel(g)), onclick: () => pick('device', groupSel(g)),
       title: state.devices.filter((d) => g.device_ids.includes(d.id)).map((d) => d.name).join(', ') },
-    dot(online), g.name, el('span', { class: 'count' }, `${online}/${g.device_ids.length}`, el('span', { class: 'sr-only' }, ' online'))));
+    members.length ? dot(online) : phoneIcon(), g.name,
+    members.length ? el('span', { class: 'count' }, `${online}/${members.length}`, el('span', { class: 'sr-only' }, ' online')) : null));
   }
-  if (state.devices.length > 1) {
+  if (pcs().length > 1) {
     chips.append(el('button', { class: 'chip' + popIf('device', 'all'), 'aria-pressed': String(state.sel.device === 'all'), onclick: () => pick('device', 'all') }, 'All PCs'));
   }
-  v.append(el('h2', {}, 'PC'), chips);
+  v.append(el('h2', {}, state.devices.some(isPhone) ? 'PC or phone' : 'PC'), chips);
 
   if (state.types.length) {
     const grid = el('div', { class: 'types' });
@@ -345,10 +354,11 @@ function triggerView() {
       }
       state.lastAlertIds = res.map((r) => r.alert_id);
       msg.value = '';
-      const missed = res.filter((r) => r.missed).map((r) => r.device);
+      const missed = res.filter((r) => r.missed);
+      const why = missed.map((r) => (r.phone ? `${r.device} has notifications off` : `${r.device} is offline`)).join(', ');
       const queued = res.filter((r) => !r.online && !r.missed).map((r) => r.device);
-      toast(missed.length === res.length ? `${missed.join(', ')} ${missed.length > 1 ? 'are' : 'is'} offline, not sent`
-        : missed.length ? `Sent, but ${missed.join(', ')} offline`
+      toast(missed.length === res.length ? `Not sent: ${why}`
+        : missed.length ? `Sent, but ${why}`
           : queued.length ? `${queued.join(', ')} offline, will show when it reconnects`
             : res.some((r) => r.merged) ? 'Added to the open alert' : 'Sent');
       state.alerts = await api('GET', '/api/alerts?limit=50');
@@ -389,25 +399,66 @@ const statusTag = {
   missed: ['correction', 'Not delivered'],
 };
 
+// Alerts on a phone read differently: there's no popup, only a notification.
+const phoneStatusText = { pending: 'Sending to the phone…', delivered: 'Notification sent', missed: 'Couldn’t notify the phone, not delivered' };
+const phoneStatusTag = { pending: ['info', 'Sending'], delivered: ['live', 'Notified'] };
+
 function alertCard(a, withCancel) {
   const online = state.devices.find((d) => d.id === a.device_id)?.online;
-  const who = a.requests.map((r) => r.name).join(', ');
+  const names = [...new Set(a.requests.map((r) => r.name))];
+  const who = names.join(', ');
   const msgs = a.requests.filter((r) => r.message).map((r) => `${r.name}: “${r.message}”`);
-  const [tone, word] = statusTag[a.status] || ['neutral', a.status];
+  const open = a.status === 'pending' || a.status === 'delivered';
+  const mine = open && !!a.phone && a.phone === state.me.email; // it's ringing my phone: answer it here
+  const [tone, word] = (a.phone && phoneStatusTag[a.status]) || statusTag[a.status] || ['neutral', a.status];
+  const title = mine ? `${who} ${names.length > 1 ? 'want' : 'wants'} you`
+    : a.phone ? phoneStatusText[a.status] || statusText[a.status]
+      : a.status === 'pending' && !online ? 'PC offline, will show when it reconnects' : statusText[a.status];
   const cue = fx.fresh.delete(a.id) ? ' is-new' : fx.changed.delete(a.id) ? ' is-changed' : '';
   const c = el('article', { class: `card alert ${a.status}${cue}` },
     el('div', { class: 'alert-meta' }, tag(tone, word),
       el('span', { class: 'dateline' }, [a.device_name, a.type_name, ago(a.created)].filter(Boolean).join(' · '))),
-    a.status === 'replied' ? el('p', { class: 'alert-title reply' }, a.reply) : el('p', { class: 'alert-title' },
-      a.status === 'pending' && !online ? 'PC offline, will show when it reconnects' : statusText[a.status]),
+    a.status === 'replied' ? el('p', { class: 'alert-title reply' }, a.reply) : el('p', { class: 'alert-title' }, title),
     msgs.length ? el('p', { class: 'alert-quote' }, msgs.join(' · ')) : null,
     el('div', { class: 'row' },
       el('div', { class: 'grow muted small' }, `From ${who}`, duration(a) ? ` · answered in ${duration(a)}` : ''),
-      withCancel && (a.status === 'pending' || a.status === 'delivered')
+      withCancel && open && !mine
         ? el('button', { class: 'link', onclick: guard(async () => { await api('POST', `/api/alerts/${a.id}/cancel`); }) }, 'Cancel')
         : null),
+    mine ? replyBox(a) : null,
   );
   return c;
+}
+
+// Answering an alert on my phone: a quick reply, a typed one, or a dismissal. Same choices as the PC popup.
+function replyBox(a) {
+  const input = el('input', { type: 'text', maxlength: '500', placeholder: 'Or type a reply', enterkeyhint: 'send', 'aria-label': 'Reply' });
+  const send = guard(async (body) => {
+    await api('POST', `/api/alerts/${a.id}/reply`, body);
+    toast(body.dismiss ? 'Dismissed' : 'Reply sent');
+    state.alerts = await api('GET', '/api/alerts?limit=50');
+    if (tab().startsWith('reply/')) location.hash = 'history'; else render();
+  });
+  const typed = () => { if (input.value.trim()) send({ text: input.value }); };
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') typed(); });
+  return el('div', { class: 'stack reply-box' },
+    state.presets.length ? el('div', { class: 'chips' }, state.presets.map((p) => el('button', { class: 'chip', onclick: () => send({ text: p }) }, p))) : null,
+    el('div', { class: 'row' }, el('div', { class: 'grow' }, input), el('button', { onclick: typed }, 'Send')),
+    el('div', {}, el('button', { class: 'link', onclick: () => send({ dismiss: true }) }, 'Dismiss without replying')));
+}
+
+// Where a phone notification lands (#reply/<id>).
+function replyView() {
+  const id = Number(tab().slice('reply/'.length));
+  const a = state.alerts.find((x) => x.id === id);
+  const v = el('div', {}, el('h2', {}, 'Reply'));
+  if (!a) v.append(el('p', { class: 'muted' }, 'That alert is no longer in the recent list.'));
+  else {
+    v.append(alertCard(a, false));
+    if (a.status !== 'pending' && a.status !== 'delivered') v.append(el('p', { class: 'muted small' }, 'Already answered or cancelled.'));
+  }
+  v.append(el('button', { class: 'link', onclick: () => { location.hash = 'history'; } }, 'See all recent alerts'));
+  return v;
 }
 
 // ---------- history ----------
@@ -459,6 +510,11 @@ function settingsView() {
           : el('button', { class: 'primary', disabled: perm === 'denied', onclick: guard(async () => { await enablePush(); render(); }) }, 'Enable'),
       );
     });
+  }
+
+  const myPhones = state.devices.filter((d) => d.phone_of === state.me.email).map((d) => d.name);
+  if (myPhones.length) {
+    card.append(el('p', { class: 'muted small' }, `Alerts sent to ${myPhones.join(' or ')} arrive here, on every device where notifications are on. Tap one to reply.`));
   }
 
   const prefs = [['mine', 'Replies to my requests'], ['all', 'Every reply'], ['none', 'Nothing']];
@@ -551,10 +607,14 @@ function versionInfo(i, newest) {
 const dateline = (...parts) => el('div', { class: 'dateline' }, parts.flat().filter(Boolean).flatMap((p, k) => (k ? [' · ', p] : [p])));
 
 function pcsSection(reload) {
-  const s = el('div', {}, el('h2', {}, 'PCs'));
+  const s = el('div', {}, el('h2', {}, state.devices.some(isPhone) ? 'PCs and phones' : 'PCs'));
   const list = el('div', { class: 'card list' });
   for (const d of state.devices) {
     const item = el('div', { class: 'item' });
+    if (isPhone(d)) {
+      list.append(phoneRow(d, item, reload));
+      continue;
+    }
     const installs = d.installs || [];
     const via = installs.length > 1 ? installs.find((i) => i.online) : null;
     // A merged PC shows the version on each install's row instead.
@@ -565,7 +625,7 @@ function pcsSection(reload) {
     const show = () => item.replaceChildren(...[el('span', { class: 'dot' + (d.online ? ' on' : '') }),
       el('div', { class: 'grow' }, el('div', { class: 'item-name' }, d.name), dateline(status, version)),
       el('button', { class: 'link', onclick: edit }, 'Rename'),
-      state.devices.length > 1 ? el('button', { class: 'link', onclick: merge }, 'Merge') : null,
+      pcs().length > 1 ? el('button', { class: 'link', onclick: merge }, 'Merge') : null,
       el('button', { class: 'link danger', onclick: guard(async () => {
         if (!confirm(`Remove ${d.name}? It will need to be paired again.`)) return;
         await api('DELETE', `/api/admin/devices/${d.id}`); await reload();
@@ -584,7 +644,7 @@ function pcsSection(reload) {
       name.select();
     }
     function merge() {
-      const others = state.devices.filter((o) => o.id !== d.id);
+      const others = pcs().filter((o) => o.id !== d.id);
       // Preselect the likeliest partner: the longest shared name prefix ("gaming-win" → "gaming").
       const shared = (o) => { let n = 0; while (n < o.name.length && o.name[n].toLowerCase() === d.name[n]?.toLowerCase()) n++; return n; };
       const guess = others.reduce((best, o) => (shared(o) > shared(best) ? o : best), others[0]);
@@ -610,10 +670,57 @@ function pcsSection(reload) {
   pair.append(el('button', { onclick: guard(async () => {
     const { code } = await api('POST', '/api/admin/pairing');
     pair.replaceChildren(installGuide(code));
-  }) }, 'Add PC'));
+  }) }, 'Add PC'), el('button', { onclick: () => pair.replaceChildren(phoneForm(reload)) }, 'Add phone'));
   list.append(pair);
   s.append(list, el('details', { class: 'card' }, el('summary', {}, 'Install or update the PC app'), installGuide(null)));
   return s;
+}
+
+const ownerName = (email) => { const u = state.admin.users.find((x) => x.email === email); return u ? shownName(u) : email; };
+
+// A phone belongs to one user: its alerts arrive as notifications in their copy of this app.
+function phoneRow(d, item, reload) {
+  const show = () => item.replaceChildren(icon('phone'),
+    el('div', { class: 'grow' }, el('div', { class: 'item-name' }, d.name), dateline(`Phone of ${ownerName(d.phone_of)}`)),
+    el('button', { class: 'link', onclick: edit }, 'Rename'),
+    el('button', { class: 'link danger', onclick: guard(async () => {
+      if (!confirm(`Remove ${d.name}? Its alert history goes with it.`)) return;
+      await api('DELETE', `/api/admin/devices/${d.id}`); await reload();
+    }) }, 'Remove'));
+  function edit() {
+    const name = el('input', { type: 'text', value: d.name, maxlength: '40', 'aria-label': `New name for ${d.name}` });
+    const save = guard(async () => {
+      if (name.value.trim() === d.name) return show();
+      await api('PATCH', `/api/admin/devices/${d.id}`, { name: name.value });
+      toast('Renamed'); await reload();
+    });
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') show(); });
+    item.replaceChildren(el('div', { class: 'grow' }, name), el('button', { class: 'primary', onclick: save }, 'Save'), el('button', { onclick: show }, 'Cancel'));
+    name.focus();
+    name.select();
+  }
+  show();
+  return item;
+}
+
+function phoneForm(reload) {
+  const suggest = (email) => `${firstName(ownerName(email))}'s phone`;
+  const who = el('select', { id: 'phone-owner' }, state.admin.users.map((u) => el('option', { value: u.email, selected: u.email === state.me.email }, shownName(u))));
+  const name = el('input', { type: 'text', id: 'phone-name', maxlength: '40', value: suggest(who.value) });
+  // Keep the suggested name in step with the owner until it's edited by hand.
+  who.addEventListener('change', () => { if (name.dataset.edited !== '1') name.value = suggest(who.value); });
+  name.addEventListener('input', () => { name.dataset.edited = '1'; });
+  const create = guard(async () => {
+    await api('POST', '/api/admin/phones', { name: name.value, email: who.value });
+    toast(`Added ${name.value.trim()}`); await reload();
+  });
+  name.addEventListener('keydown', (e) => { if (e.key === 'Enter') create(); });
+  return el('div', { class: 'stack grow pop-in' },
+    el('div', {}, el('label', { class: 'field', for: 'phone-owner' }, 'Whose phone'), who),
+    el('div', {}, el('label', { class: 'field', for: 'phone-name' }, 'Name'), name),
+    el('div', { class: 'muted small' }, 'It shows up next to the PCs. Alerts for it arrive as notifications in that person’s copy of this app ',
+      '(Settings → Notifications → Enable, on their phone), and they reply from there. Nothing to install.'),
+    el('div', { class: 'row' }, el('button', { class: 'primary', onclick: create }, 'Add phone'), el('button', { onclick: () => render() }, 'Cancel')));
 }
 
 // The OSes of a merged (dual-boot) PC, each with its own pairing.

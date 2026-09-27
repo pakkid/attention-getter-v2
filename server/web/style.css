@@ -234,6 +234,7 @@ label.check input { width: 20px; height: 20px; accent-color: var(--fern); flex: 
 .alert-title.reply { font-size: 22px; line-height: 28px; font-weight: 500; }
 .alert-quote { margin: var(--space-1) 0 0; font: italic 400 17px/26px var(--font-serif); color: var(--ink); overflow-wrap: anywhere; }
 .alert .row { margin-top: var(--space-1); }
+.alert .reply-box { margin-top: var(--space-4); padding-top: var(--space-4); border-top: var(--line-hair) solid var(--rule); }
 .alert .row button.link { min-height: 36px; }
 
 .tag {
@@ -307,7 +308,7 @@ button, nav a, .chip, .type, summary { touch-action: manipulation; }
   .types { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
   /* Admin rows: actions drop under the name instead of squeezing it. */
   .list > .item > .grow { flex-basis: 100%; }
-  .list > .item > .dot + .grow, .installs > .item > .dot + .grow { flex-basis: calc(100% - 24px); }
+  .list > .item > .dot + .grow, .list > .item > .icon + .grow, .installs > .item > .dot + .grow { flex-basis: calc(100% - 30px); }
   .list > .item > img + .grow { flex-basis: calc(100% - 76px); }
   .list > .item:has(label.field) > .grow { flex-basis: 100%; }
   .list > .item:has(label.field) > button { width: 100%; }
