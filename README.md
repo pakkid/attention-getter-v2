@@ -42,7 +42,7 @@ Open the public URL and sign in with Google. Accounts in `ADMIN_EMAILS` are admi
 - **iPhone/iPad (iOS 16.4+):** open the site in Safari, tap Share, choose **Add to Home Screen**, and open it from the home screen. Then go to **Settings → Enable**. iOS only allows web push for home-screen apps.
 - **Android:** in Chrome, choose Install app (or Add to Home screen), then **Settings → Enable**.
 
-Under **Settings** each user picks what to be notified about (*replies to my requests*, *every reply*, or *nothing*) and can set the name shown on the PC popup (by default their Google first name).
+Under **Settings** each user picks what to be notified about (*replies to my requests*, *every reply*, or *nothing*) and can set the name shown on the PC popup (by default their Google first name). With *replies to my requests*, ticking **Also replies to Alexa and webhook triggers** adds replies to any alert triggered through a trigger key.
 
 ## 2. PC client
 
@@ -132,7 +132,7 @@ POST https://attention.example.com/api/trigger?key=ag_XXXX&type=dinner&pc=deskto
 | `pc`      | no       | PC name, group name, or `all`. Omitted: the only PC (required if several are paired). Ignored if the key is pinned to a PC. |
 | `message` | no       | Shown in the popup (max 200 chars). |
 
-Response: `{"ok":true,"alerts":[{"alert_id":7,"device":"desktop","merged":false,"online":true,"missed":false}]}`. `missed` means the PC was offline and the alert wasn't sent; if that's true for every target, the response is `409` with `"ok":false`. The key's name (e.g. "Alexa") is shown as the requester, and the key's creator receives reply notifications if their preference is *replies to my requests*.
+Response: `{"ok":true,"alerts":[{"alert_id":7,"device":"desktop","merged":false,"online":true,"missed":false}]}`. `missed` means the PC was offline and the alert wasn't sent; if that's true for every target, the response is `409` with `"ok":false`. The key's name (e.g. "Alexa") is shown as the requester, and the key's creator receives reply notifications if their preference is *replies to my requests*. Other users get them too if they ticked **Also replies to Alexa and webhook triggers** in Settings (or chose *every reply*).
 
 ## Releasing
 

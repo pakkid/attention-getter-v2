@@ -100,6 +100,8 @@ func (s *Server) patchMe(w http.ResponseWriter, r *http.Request, u *store.User) 
 	var body struct {
 		NotifyPref  *string `json:"notify_pref"`
 		DisplayName *string `json:"display_name"` // empty resets to the Google name
+		// NotifyAutomation also sends replies to Alexa/webhook triggers (with notify_pref 'mine').
+		NotifyAutomation *bool `json:"notify_automation"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		httpError(w, http.StatusBadRequest, "bad body")
@@ -129,6 +131,13 @@ func (s *Server) patchMe(w http.ResponseWriter, r *http.Request, u *store.User) 
 			return
 		}
 		u.DisplayName = name
+	}
+	if on := body.NotifyAutomation; on != nil {
+		if err := s.St.SetNotifyAutomation(r.Context(), u.Email, *on); err != nil {
+			internalError(w, err)
+			return
+		}
+		u.NotifyAutomation = *on
 	}
 	writeJSON(w, http.StatusOK, u)
 }

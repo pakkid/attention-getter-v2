@@ -291,3 +291,43 @@ func TestDualBootInstalls(t *testing.T) {
 		t.Fatal("expected offline")
 	}
 }
+
+func TestNotifyAutomationOptIn(t *testing.T) {
+	h, st, n, dev, inst := setup(t)
+	ctx := context.Background()
+	h.Attach(ctx, dev, inst)
+	// mom opts in; bro opts in too but his pref is 'none', so it has no effect.
+	for _, e := range []string{"mom@x.com", "bro@x.com"} {
+		if err := st.SetNotifyAutomation(ctx, e, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secret, _ := st.CreateAPIKey(ctx, "Alexa", "dad@x.com", nil, nil)
+	k, _ := st.APIKeyBySecret(ctx, secret)
+
+	reply := func(req store.Requester) []string {
+		t.Helper()
+		a, err := h.Trigger(ctx, dev, nil, req, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.HandleDeviceMessage(ctx, dev, inst, []byte(fmt.Sprintf(`{"op":"reply","alert_id":%d,"text":"ok"}`, a.ID))); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case s := <-n.sent:
+			return s.emails
+		case <-time.After(time.Second):
+			t.Fatal("no notification")
+		}
+		return nil
+	}
+
+	if got := reply(store.Requester{Email: k.OwnerEmail, APIKeyID: k.ID, Name: k.Name}); !slices.Equal(got, []string{"dad@x.com", "mom@x.com", "sis@x.com"}) {
+		t.Fatalf("api-key trigger recipients = %v", got)
+	}
+	// A trigger from a person doesn't reach mom: she only opted into automation replies.
+	if got := reply(store.Requester{Email: "dad@x.com", Name: "Dad"}); !slices.Equal(got, []string{"dad@x.com", "sis@x.com"}) {
+		t.Fatalf("user trigger recipients = %v", got)
+	}
+}

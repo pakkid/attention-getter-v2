@@ -131,6 +131,8 @@ var migrations = []string{
 	CREATE INDEX installs_device ON installs(device_id);
 	INSERT INTO installs(device_id, token_hash, label, created, last_seen)
 		SELECT id, token_hash, name, created, last_seen FROM devices;`,
+	// Opt-in for 'mine' users: also notify about replies to API-key (Alexa/webhook) triggers.
+	`ALTER TABLE users ADD COLUMN notify_automation INTEGER NOT NULL DEFAULT 0;`,
 }
 
 var defaultPresets = []string{"Coming now", "5 min", "15 min", "Busy, later"}
@@ -225,15 +227,17 @@ type User struct {
 	Picture     string `json:"picture"`
 	Role        string `json:"role"`
 	NotifyPref  string `json:"notify_pref"`
+	// NotifyAutomation adds replies to API-key (Alexa/webhook) triggers when NotifyPref is 'mine'.
+	NotifyAutomation bool `json:"notify_automation"`
 }
 
 func (u *User) IsAdmin() bool { return u.Role == "admin" }
 
-const userCols = `u.email, u.name, u.display_name, u.picture, u.role, u.notify_pref`
+const userCols = `u.email, u.name, u.display_name, u.picture, u.role, u.notify_pref, u.notify_automation`
 
 func scanUser(sc interface{ Scan(...any) error }) (*User, error) {
 	var u User
-	if err := sc.Scan(&u.Email, &u.Name, &u.DisplayName, &u.Picture, &u.Role, &u.NotifyPref); err != nil {
+	if err := sc.Scan(&u.Email, &u.Name, &u.DisplayName, &u.Picture, &u.Role, &u.NotifyPref, &u.NotifyAutomation); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -283,6 +287,11 @@ func (s *Store) SetDisplayName(ctx context.Context, email, name string) error {
 
 func (s *Store) SetNotifyPref(ctx context.Context, email, pref string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET notify_pref = ? WHERE email = ?`, pref, email)
+	return err
+}
+
+func (s *Store) SetNotifyAutomation(ctx context.Context, email string, on bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET notify_automation = ? WHERE email = ?`, on, email)
 	return err
 }
 

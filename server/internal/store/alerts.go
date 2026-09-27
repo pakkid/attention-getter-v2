@@ -193,7 +193,8 @@ func (s *Store) ResolveAlert(ctx context.Context, alertID, deviceID int64, statu
 }
 
 // NotifyRecipients returns who should get a push about an alert's outcome:
-// everyone with notify_pref 'all', plus requesters (or API key owners) with 'mine'.
+// everyone with notify_pref 'all', plus requesters (or API key owners) with 'mine',
+// plus 'mine' users who opted into automation replies when an API key triggered it.
 func (s *Store) NotifyRecipients(ctx context.Context, alertID int64) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT email FROM users WHERE notify_pref = 'all'
@@ -201,7 +202,10 @@ func (s *Store) NotifyRecipients(ctx context.Context, alertID int64) ([]string, 
 		SELECT u.email FROM alert_requests r
 			LEFT JOIN api_keys k ON k.id = r.api_key_id
 			JOIN users u ON u.email = COALESCE(r.requester_email, k.owner_email)
-			WHERE r.alert_id = ? AND u.notify_pref = 'mine'`, alertID)
+			WHERE r.alert_id = ? AND u.notify_pref = 'mine'
+		UNION
+		SELECT email FROM users WHERE notify_pref = 'mine' AND notify_automation = 1
+			AND EXISTS(SELECT 1 FROM alert_requests WHERE alert_id = ? AND api_key_id IS NOT NULL)`, alertID, alertID)
 	if err != nil {
 		return nil, err
 	}

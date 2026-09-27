@@ -467,6 +467,14 @@ function settingsView() {
       class: 'chip' + (fx.picked === `pref:${val}` ? ' pop' : ''), 'aria-pressed': String(state.me.notify_pref === val),
       onclick: guard(async () => { state.me = await api('PATCH', '/api/me', { notify_pref: val }); fx.picked = `pref:${val}`; render(); }),
     }, label)))));
+  if (state.me.notify_pref === 'mine') {
+    card.append(el('label', { class: 'check' },
+      el('input', {
+        type: 'checkbox', checked: state.me.notify_automation,
+        onchange: guard(async (e) => { state.me = await api('PATCH', '/api/me', { notify_automation: e.target.checked }); render(); }),
+      }),
+      'Also replies to Alexa and webhook triggers'));
+  }
   return v;
 }
 
