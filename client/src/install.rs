@@ -39,7 +39,12 @@ pub fn gnome_accels(hotkey: &str) -> Vec<String> {
     }
     let mut out = vec![format!("{mods}{key}")];
     if key.eq_ignore_ascii_case("F13") {
-        // Default keymaps often deliver F13 as XF86Tools.
+        // Default keymaps deliver F13 as XF86Tools, which GNOME binds to Settings and
+        // other bindings may claim too. Mutter gives a keysym's secondary keycodes (the F13
+        // key is one for XF86Tools) to whichever binding it indexes first, in hash order,
+        // so the key worked only some of the time. Binding keycode 191 (evdev KEY_F13)
+        // directly makes it the key's primary binding, which always wins.
+        out.push(format!("{mods}0xbf"));
         out.push(format!("{mods}XF86Tools"));
     }
     out
@@ -287,7 +292,7 @@ mod tests {
 
     #[test]
     fn converts_hotkeys() {
-        assert_eq!(gnome_accels("F13"), vec!["F13", "XF86Tools"]);
+        assert_eq!(gnome_accels("F13"), vec!["F13", "0xbf", "XF86Tools"]);
         assert_eq!(gnome_accels("Ctrl+Shift+F12"), vec!["<Control><Shift>F12"]);
         assert_eq!(gnome_accels("Alt+KeyA"), vec!["<Alt>a"]);
         assert_eq!(gnome_accels("super+Insert"), vec!["<Super>Insert"]);

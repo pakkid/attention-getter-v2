@@ -105,7 +105,7 @@ Wayland apps can't refuse focus when they open, and they can't focus themselves 
 
 GNOME only loads a newly installed extension after you **log out and back in**. Then run `gnome-extensions enable attention-getter@pakkid` if `install` couldn't enable it.
 
-F13 is often delivered as `XF86Tools` by default keymaps, so both are bound. To change the key, edit `hotkey` in `~/.config/attention-getter/config.toml` and re-run `attention-getter install`.
+F13 is often delivered as `XF86Tools` by default keymaps, so both are bound, plus the F13 key's keycode (`0xbf`) so other `XF86Tools` shortcuts can't take it over. To change the key, edit `hotkey` in `~/.config/attention-getter/config.toml` and re-run `attention-getter install`.
 
 On X11 and Windows the client grabs the hotkey itself, only while a popup is showing.
 

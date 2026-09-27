@@ -17,7 +17,8 @@ const log = (msg) => console.log(`attention-getter: ${msg}`);
 export default class AttentionGetterExtension extends Extension {
     enable() {
         this._settings = this.getSettings();
-        this._lastFocus = null;
+        const focused = global.display.focus_window;
+        this._lastFocus = isPopup(focused) ? null : focused;
         this._guardUntil = 0;
 
         Main.wm.addKeybinding('focus-key', this._settings, Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
@@ -28,6 +29,9 @@ export default class AttentionGetterExtension extends Extension {
         this._createdId = global.display.connect('window-created', (_d, win) => this._onCreated(win));
     }
 
+    // Also runs in the unlock-dialog session mode (see metadata.json), so it stays enabled
+    // while the screen is locked: a popup that opens then still gets set up. The key only
+    // works in the modes passed to addKeybinding, never on the lock screen.
     disable() {
         Main.wm.removeKeybinding('focus-key');
         global.display.disconnect(this._focusId);
