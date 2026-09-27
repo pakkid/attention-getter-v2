@@ -404,16 +404,14 @@ const phoneStatusText = { pending: 'Sending to the phone…', delivered: 'Notifi
 const phoneStatusTag = { pending: ['info', 'Sending'], delivered: ['live', 'Notified'] };
 
 function alertCard(a, withCancel) {
-  const online = state.devices.find((d) => d.id === a.device_id)?.online;
-  const names = [...new Set(a.requests.map((r) => r.name))];
-  const who = names.join(', ');
-  const msgs = a.requests.filter((r) => r.message).map((r) => `${r.name}: “${r.message}”`);
   const open = a.status === 'pending' || a.status === 'delivered';
-  const mine = open && !!a.phone && a.phone === state.me.email; // it's ringing my phone: answer it here
+  if (open && a.phone && a.phone === state.me.email) return ringCard(a); // it's ringing my phone: answer it here
+  const online = state.devices.find((d) => d.id === a.device_id)?.online;
+  const who = a.requests.map((r) => r.name).join(', ');
+  const msgs = a.requests.filter((r) => r.message).map((r) => `${r.name}: “${r.message}”`);
   const [tone, word] = (a.phone && phoneStatusTag[a.status]) || statusTag[a.status] || ['neutral', a.status];
-  const title = mine ? `${who} ${names.length > 1 ? 'want' : 'wants'} you`
-    : a.phone ? phoneStatusText[a.status] || statusText[a.status]
-      : a.status === 'pending' && !online ? 'PC offline, will show when it reconnects' : statusText[a.status];
+  const title = a.phone ? phoneStatusText[a.status] || statusText[a.status]
+    : a.status === 'pending' && !online ? 'PC offline, will show when it reconnects' : statusText[a.status];
   const cue = fx.fresh.delete(a.id) ? ' is-new' : fx.changed.delete(a.id) ? ' is-changed' : '';
   const c = el('article', { class: `card alert ${a.status}${cue}` },
     el('div', { class: 'alert-meta' }, tag(tone, word),
@@ -422,17 +420,29 @@ function alertCard(a, withCancel) {
     msgs.length ? el('p', { class: 'alert-quote' }, msgs.join(' · ')) : null,
     el('div', { class: 'row' },
       el('div', { class: 'grow muted small' }, `From ${who}`, duration(a) ? ` · answered in ${duration(a)}` : ''),
-      withCancel && open && !mine
+      withCancel && open
         ? el('button', { class: 'link', onclick: guard(async () => { await api('POST', `/api/alerts/${a.id}/cancel`); }) }, 'Cancel')
         : null),
-    mine ? replyBox(a) : null,
   );
   return c;
 }
 
+// An alert ringing my phone, laid out like the PC popup: the GIF, the type as a heading, a line
+// per request, then the reply box.
+function ringCard(a) {
+  const t = state.types.find((x) => x.id === a.type_id);
+  const cue = fx.fresh.delete(a.id) ? ' is-new' : fx.changed.delete(a.id) ? ' is-changed' : '';
+  return el('article', { class: `card alert ring${cue}` },
+    t ? el('img', { class: 'ring-gif', src: mediaURL(t, 'gif'), alt: '' }) : null,
+    el('p', { class: 'ring-title' }, (a.type_name || 'Attention!').toUpperCase()),
+    a.requests.map((r) => el('p', { class: 'ring-line' }, r.message ? `${r.name}: “${r.message}”` : r.name)),
+    el('div', { class: 'dateline' }, [a.device_name, ago(a.created)].join(' · ')),
+    replyBox(a));
+}
+
 // Answering an alert on my phone: a quick reply, a typed one, or a dismissal. Same choices as the PC popup.
 function replyBox(a) {
-  const input = el('input', { type: 'text', maxlength: '500', placeholder: 'Or type a reply', enterkeyhint: 'send', 'aria-label': 'Reply' });
+  const input = el('input', { type: 'text', maxlength: '500', placeholder: 'Why can’t you come / how long?', enterkeyhint: 'send', 'aria-label': 'Reply' });
   const send = guard(async (body) => {
     await api('POST', `/api/alerts/${a.id}/reply`, body);
     toast(body.dismiss ? 'Dismissed' : 'Reply sent');
@@ -442,8 +452,9 @@ function replyBox(a) {
   const typed = () => { if (input.value.trim()) send({ text: input.value }); };
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') typed(); });
   return el('div', { class: 'stack reply-box' },
-    state.presets.length ? el('div', { class: 'chips' }, state.presets.map((p) => el('button', { class: 'chip', onclick: () => send({ text: p }) }, p))) : null,
     el('div', { class: 'row' }, el('div', { class: 'grow' }, input), el('button', { onclick: typed }, 'Send')),
+    state.presets.length ? el('div', { class: 'chips' }, state.presets.map((p, i) => el('button', { class: 'chip', onclick: () => send({ text: p }) },
+      el('span', { class: 'count', 'aria-hidden': 'true' }, i + 1), p))) : null,
     el('div', {}, el('button', { class: 'link', onclick: () => send({ dismiss: true }) }, 'Dismiss without replying')));
 }
 

@@ -385,7 +385,7 @@ func TestPhone(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := nextPush(t, n)
-	if !slices.Equal(s.emails, []string{"kid@x.com"}) || s.msg.Title != "Mom wants you" || s.msg.Body != "Mom: dinner" ||
+	if !slices.Equal(s.emails, []string{"kid@x.com"}) || s.msg.Title != "ATTENTION!" || s.msg.Body != "Mom: “dinner”" ||
 		s.msg.URL != fmt.Sprintf("/#reply/%d", a.ID) {
 		t.Fatalf("ring = %+v", s)
 	}
@@ -395,7 +395,7 @@ func TestPhone(t *testing.T) {
 	if b.ID != a.ID {
 		t.Fatalf("expected merge into %d, got %d", a.ID, b.ID)
 	}
-	if s := nextPush(t, n); s.msg.Title != "Mom and Dad want you" {
+	if s := nextPush(t, n); s.msg.Body != "Mom: “dinner”\nDad" {
 		t.Fatalf("re-ring = %+v", s.msg)
 	}
 

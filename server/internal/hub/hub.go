@@ -333,33 +333,22 @@ func (h *Hub) ringPhone(a *store.Alert) {
 	}
 }
 
-// PhoneMessage is the push notification that rings a phone: who wants its owner, and why.
+// PhoneMessage is the push notification that rings a phone, laid out like the PC popup: the
+// type as a heading, then a line per request.
 func PhoneMessage(a *store.Alert) push.Message {
-	var names, msgs []string
+	title := "ATTENTION!"
+	if a.TypeName != "" {
+		title = strings.ToUpper(a.TypeName)
+	}
+	lines := make([]string, 0, len(a.Requests))
 	for _, r := range a.Requests {
-		if !slices.Contains(names, r.Name) {
-			names = append(names, r.Name)
-		}
-		if r.Message != "" {
-			msgs = append(msgs, r.Name+": "+r.Message)
-		}
-	}
-	title := "Someone wants you"
-	switch len(names) {
-	case 0:
-	case 1:
-		title = names[0] + " wants you"
-	default:
-		title = strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1] + " want you"
-	}
-	body := strings.Join(msgs, "\n")
-	if body == "" {
-		body = "Tap to reply"
-		if a.TypeName != "" {
-			body = a.TypeName + ". Tap to reply"
+		if r.Message == "" {
+			lines = append(lines, r.Name)
+		} else {
+			lines = append(lines, r.Name+": “"+r.Message+"”")
 		}
 	}
-	return push.Message{Title: title, Body: body, Tag: fmt.Sprintf("alert-%d", a.ID), URL: fmt.Sprintf("/#reply/%d", a.ID)}
+	return push.Message{Title: title, Body: strings.Join(lines, "\n"), Tag: fmt.Sprintf("alert-%d", a.ID), URL: fmt.Sprintf("/#reply/%d", a.ID)}
 }
 
 // ErrNotYours is returned when someone other than a phone's owner answers its alert.
